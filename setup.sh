@@ -1169,6 +1169,9 @@ cmd_caddy() {
 configure_contactdb() {
     log_header "Configuring ContactDB"
 
+    # Ensure enrichment APIs are loaded
+    setup_enrichment_apis
+
     # Use hardcoded password from docker-compose.yml
     local db_user="contactdb"
     local db_password="contactdb"
@@ -1273,6 +1276,7 @@ CONTACTDB_URL=http://host.docker.internal:42800
 CONTACTDB_URL_FRONTEND=$contactdb_url_frontend
 REDIS_URL=redis://localhost:42170
 DATABASE_URL=postgresql://dataindex:$DATAINDEX_POSTGRES_PASSWORD@localhost:42434/dataindex
+BASE_PATH=/dataindex/
 
 # Ingestors
 EOF
@@ -1446,6 +1450,9 @@ EOF
 configure_crm_reply() {
     log_header "Configuring CRM Reply"
 
+    # Ensure enrichment APIs are loaded
+    setup_enrichment_apis
+
     # Generate passwords - check existing .env file if cache is empty
     prompt_or_cache "CRM_POSTGRES_PASSWORD" "PostgreSQL password for CRM Reply" "auto" true "$PLATFORM_ROOT/crm-reply/.env"
 
@@ -1516,6 +1523,9 @@ EOF
 
 configure_meeting_prep() {
     log_header "Configuring Meeting Prep"
+
+    # Ensure enrichment APIs are loaded
+    setup_enrichment_apis
 
     # Generate passwords and secrets - check existing .env file if cache is empty
     prompt_or_cache "MEETING_POSTGRES_PASSWORD" "PostgreSQL password for Meeting Prep" "postgres" true "$PLATFORM_ROOT/meeting-prep/.env"
@@ -1590,28 +1600,36 @@ EOF
     log_success "Meeting Prep configured"
 }
 
+# Generic function to configure a service by ID
+configure_service() {
+    local service_id=$1
+
+    case "$service_id" in
+        contactdb)
+            configure_contactdb
+            ;;
+        dataindex)
+            configure_dataindex
+            ;;
+        babelfish)
+            configure_babelfish
+            ;;
+        crm-reply)
+            configure_crm_reply
+            ;;
+        meeting-prep)
+            configure_meeting_prep
+            ;;
+        *)
+            log_warning "No configuration function for $service_id"
+            return 1
+            ;;
+    esac
+}
+
 configure_all_services() {
     for service_id in "${SELECTED_SERVICES[@]}"; do
-        case "$service_id" in
-            contactdb)
-                configure_contactdb
-                ;;
-            dataindex)
-                configure_dataindex
-                ;;
-            babelfish)
-                configure_babelfish
-                ;;
-            crm-reply)
-                configure_crm_reply
-                ;;
-            meeting-prep)
-                configure_meeting_prep
-                ;;
-            *)
-                log_warning "No configuration function for $service_id"
-                ;;
-        esac
+        configure_service "$service_id"
     done
 }
 
@@ -1803,7 +1821,6 @@ update_service() {
         log_info "Updating Caddy configuration..."
 
         # Load cached credentials
-        init_cache
         local caddy_domain=$(load_from_cache "CADDY_DOMAIN")
         local password_hash=$(load_from_cache "CADDY_PASSWORD_HASH")
 
@@ -1844,8 +1861,16 @@ update_service() {
         log_warning "Failed to pull latest changes for $service_id"
     }
 
+    # Regenerate configuration
+    log_info "Regenerating configuration for $service_id..."
+    cd "$PLATFORM_ROOT"
+
+    # Use the generic configure_service function
+    configure_service "$service_id" || log_info "No configuration regeneration needed for $service_id"
+
     # Rebuild and start
     log_info "Rebuilding and starting $service_id..."
+    cd "$service_path"
 
     if [ -f "docker-compose.yml" ]; then
         docker_compose up -d --build 2>&1 | grep -v "password" || {
@@ -1962,6 +1987,8 @@ cmd_update() {
         exit 1
     fi
 
+    init_cache
+
     if [ "$service_name" = "all" ]; then
         log_header "Updating All Services"
         local services=($(get_configured_services))
@@ -2039,27 +2066,8 @@ cmd_enable() {
     # Clone the service
     clone_services
 
-    # Configure the service
-    case "$service_name" in
-        babelfish)
-            configure_babelfish
-            ;;
-        crm-reply)
-            configure_crm_reply
-            ;;
-        meeting-prep)
-            configure_meeting_prep
-            ;;
-        dataindex)
-            configure_dataindex
-            ;;
-        contactdb)
-            configure_contactdb
-            ;;
-        *)
-            log_warning "No configuration function for $service_name"
-            ;;
-    esac
+    # Configure the service using the generic function
+    configure_service "$service_name"
 
     # Update cache to include this service in optional services
     local cached_services=$(load_from_cache "SELECTED_OPTIONAL_SERVICES")
