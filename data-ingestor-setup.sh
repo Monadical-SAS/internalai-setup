@@ -1,0 +1,1773 @@
+#!/bin/bash
+set -euo pipefail
+
+# Monadical Platform Setup Script
+# Usage: bash <(curl -fsSL https://example.com/setup.sh)
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+PLATFORM_NAME="Monadical Platform"
+
+# Determine platform root - avoid double nesting
+if [[ "$(basename $(pwd))" == "platform-workspace" ]]; then
+    PLATFORM_ROOT="$(pwd)"
+else
+    PLATFORM_ROOT="$(pwd)/platform-workspace"
+fi
+
+CACHE_FILE="$PLATFORM_ROOT/.credentials.cache"
+DOCKER_NETWORK="monadical-platform"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# ============================================================================
+# Service Registry (Hardcoded)
+# ============================================================================
+
+# Format: "service_id|repo_url|branch|port|description|mandatory"
+AVAILABLE_SERVICES=(
+    "contactdb|https://github.com/Monadical-SAS/contactdb.git|main|42173|Unified contact management|true"
+    "dataindex|https://github.com/Monadical-SAS/dataindex.git|main|42180|Data aggregation from multiple sources|true"
+    "babelfish|https://github.com/Monadical-SAS/babelfish.git|authless-ux|8880|Universal communications bridge (Matrix homeserver)|false"
+    # "crm-reply|https://github.com/Monadical-SAS/crm-reply.git|main|3001|AI-powered CRM reply assistant|false"
+    "meeting-prep|https://github.com/Monadical-SAS/meeting-prep.git|pangolin-deployment|8081|Meeting preparation assistant|false"
+)
+
+# DataIndex ingestors
+DATAINDEX_INGESTORS=(
+    "calendar|ICS Calendar (Fastmail Calendar, iCal)|DATAINDEX_PERSONAL"
+    "zulip|Zulip Chat|DATAINDEX_ZULIP"
+    "email|Email (mbsync/notmuch)|DATAINDEX_EMAIL"
+    "reflector|Reflector API|DATAINDEX_REFLECTOR"
+)
+
+# ============================================================================
+# Logging Functions
+# ============================================================================
+
+log_info() {
+    echo -e "${BLUE}ℹ${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}✓${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}⚠${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}✗${NC} $1"
+}
+
+log_header() {
+    echo ""
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}  $1${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+}
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+prompt() {
+    local varname=$1
+    local prompt_text=$2
+    local default_value=$3
+    local is_secret=${4:-false}
+
+    if [ -n "$default_value" ]; then
+        prompt_text="$prompt_text [${default_value}]"
+    fi
+
+    if [ "$is_secret" = true ]; then
+        read -s -p "$(echo -e ${YELLOW}${prompt_text}: ${NC})" value
+        echo ""
+    else
+        read -p "$(echo -e ${YELLOW}${prompt_text}: ${NC})" value
+    fi
+
+    if [ -z "$value" ] && [ -n "$default_value" ]; then
+        value="$default_value"
+    fi
+
+    eval "$varname='$value'"
+}
+
+generate_password() {
+    openssl rand -hex 32
+}
+
+# ============================================================================
+# Credential Cache (Optional Encryption)
+# ============================================================================
+
+CACHE_PASSWORD=""
+USE_ENCRYPTION=false
+IGNORE_CACHE=false
+
+init_cache() {
+    mkdir -p "$(dirname "$CACHE_FILE")"
+
+    # If --no-cache flag is set, clear the cache
+    if [ "$IGNORE_CACHE" = true ]; then
+        log_warning "Ignoring cache (--no-cache flag set)"
+        rm -f "$CACHE_FILE"
+        touch "$CACHE_FILE"
+        return
+    fi
+
+    if [ -f "$CACHE_FILE" ]; then
+        # Check if encrypted
+        if head -n1 "$CACHE_FILE" | grep -q "^Salted__"; then
+            USE_ENCRYPTION=true
+            prompt CACHE_PASSWORD "Enter cache password" "" true
+        fi
+    else
+        prompt USE_ENCRYPTION_INPUT "Encrypt credential cache? (recommended)" "yes"
+        if [ "$USE_ENCRYPTION_INPUT" = "yes" ] || [ "$USE_ENCRYPTION_INPUT" = "y" ]; then
+            USE_ENCRYPTION=true
+            prompt CACHE_PASSWORD "Create cache password" "" true
+        fi
+        touch "$CACHE_FILE"
+    fi
+}
+
+save_to_cache() {
+    local key=$1
+    local value=$2
+
+    if [ "$USE_ENCRYPTION" = true ]; then
+        # Decrypt, append, re-encrypt
+        local temp_file=$(mktemp)
+        if [ -s "$CACHE_FILE" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$CACHE_PASSWORD" -in "$CACHE_FILE" 2>/dev/null > "$temp_file" || true
+        fi
+        grep -v "^$key=" "$temp_file" > "${temp_file}.tmp" 2>/dev/null || true
+        echo "$key=$value" >> "${temp_file}.tmp"
+        openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$CACHE_PASSWORD" -in "${temp_file}.tmp" -out "$CACHE_FILE"
+        rm -f "$temp_file" "${temp_file}.tmp"
+    else
+        # Plain text
+        grep -v "^$key=" "$CACHE_FILE" > "${CACHE_FILE}.tmp" 2>/dev/null || true
+        echo "$key=$value" >> "${CACHE_FILE}.tmp"
+        mv "${CACHE_FILE}.tmp" "$CACHE_FILE"
+    fi
+}
+
+load_from_cache() {
+    local key=$1
+
+    if [ ! -f "$CACHE_FILE" ]; then
+        echo ""
+        return
+    fi
+
+    if [ "$USE_ENCRYPTION" = true ]; then
+        openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$CACHE_PASSWORD" -in "$CACHE_FILE" 2>/dev/null | grep "^$key=" | cut -d= -f2- | tail -1 || echo ""
+    else
+        grep "^$key=" "$CACHE_FILE" | cut -d= -f2- | tail -1 || echo ""
+    fi
+}
+
+# Try to retrieve existing password from .env file
+get_existing_password_from_env() {
+    local env_file=$1
+    local var_name=$2
+
+    if [ ! -f "$env_file" ]; then
+        echo ""
+        return
+    fi
+
+    # Extract value from .env file
+    grep "^${var_name}=" "$env_file" | cut -d= -f2- | tail -1 || echo ""
+}
+
+prompt_or_cache() {
+    local var_name=$1
+    local prompt_text=$2
+    local default_value=$3
+    local is_secret=${4:-false}
+    local env_file=${5:-}
+
+    # Check cache first
+    local cached_value=$(load_from_cache "$var_name")
+    if [ -n "$cached_value" ]; then
+        log_info "Using cached value for $var_name"
+        eval "$var_name='$cached_value'"
+        return
+    fi
+
+    # If cache is empty but an .env file exists, try to get password from there
+    if [ -n "$env_file" ] && [ -f "$env_file" ]; then
+        local existing_value=$(get_existing_password_from_env "$env_file" "$var_name")
+        if [ -n "$existing_value" ]; then
+            log_info "Using existing password from $env_file for $var_name"
+            eval "$var_name='$existing_value'"
+            save_to_cache "$var_name" "$existing_value"
+            return
+        fi
+    fi
+
+    # Handle auto-generation
+    if [ "$default_value" = "auto" ]; then
+        local generated=$(generate_password)
+        log_info "Auto-generated $var_name"
+        eval "$var_name='$generated'"
+        save_to_cache "$var_name" "$generated"
+        return
+    fi
+
+    # Prompt user
+    prompt "$var_name" "$prompt_text" "$default_value" "$is_secret"
+    local value="${!var_name}"
+
+    if [ -n "$value" ]; then
+        save_to_cache "$var_name" "$value"
+    fi
+}
+
+# ============================================================================
+# Docker Compose Wrapper
+# ============================================================================
+
+# Wrapper function to use either docker-compose (v1) or docker compose (v2)
+docker_compose() {
+    if command -v docker-compose &> /dev/null; then
+        docker-compose "$@"
+    else
+        docker compose "$@"
+    fi
+}
+
+# ============================================================================
+# Dependency Management
+# ============================================================================
+
+check_dependencies() {
+    log_header "Checking Dependencies"
+
+    # Detect OS
+    local OS_TYPE=""
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        OS_TYPE="macos"
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        OS_TYPE="linux"
+    else
+        OS_TYPE="unknown"
+    fi
+
+    # Check/Install Git
+    if ! command -v git &> /dev/null; then
+        log_info "Git not found, installing..."
+        case "$OS_TYPE" in
+            macos)
+                if command -v brew &> /dev/null; then
+                    brew install git
+                else
+                    log_error "Homebrew not found. Please install Homebrew first: https://brew.sh"
+                    exit 1
+                fi
+                ;;
+            linux)
+                if command -v apt-get &> /dev/null; then
+                    sudo apt-get update && sudo apt-get install -y git
+                elif command -v yum &> /dev/null; then
+                    sudo yum install -y git
+                elif command -v dnf &> /dev/null; then
+                    sudo dnf install -y git
+                else
+                    log_error "Package manager not found. Please install git manually."
+                    exit 1
+                fi
+                ;;
+            *)
+                log_error "Unsupported OS. Please install git manually."
+                exit 1
+                ;;
+        esac
+        log_success "Git installed: $(git --version)"
+    else
+        log_success "Git installed: $(git --version)"
+    fi
+
+    # Check/Install Docker
+    if ! command -v docker &> /dev/null; then
+        log_info "Docker not found, installing..."
+        case "$OS_TYPE" in
+            macos)
+                if command -v brew &> /dev/null; then
+                    log_info "Installing Docker Desktop via Homebrew..."
+                    brew install --cask docker
+                    log_warning "Docker Desktop installed. Please start Docker Desktop from Applications and then re-run this script."
+                    exit 0
+                else
+                    log_error "Homebrew not found. Please install Docker Desktop manually: https://www.docker.com/products/docker-desktop"
+                    exit 1
+                fi
+                ;;
+            linux)
+                log_info "Installing Docker Engine..."
+                if command -v apt-get &> /dev/null; then
+                    # Ubuntu/Debian
+                    sudo apt-get update
+                    sudo apt-get install -y ca-certificates curl gnupg lsb-release
+                    sudo mkdir -p /etc/apt/keyrings
+                    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+                    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                    sudo apt-get update
+                    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+                    sudo systemctl start docker
+                    sudo systemctl enable docker
+                    # Add user to docker group
+                    sudo usermod -aG docker $USER
+                    log_warning "Docker installed. Please log out and back in for group changes to take effect, then re-run this script."
+                    exit 0
+                elif command -v yum &> /dev/null; then
+                    # CentOS/RHEL
+                    sudo yum install -y yum-utils
+                    sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+                    sudo yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+                    sudo systemctl start docker
+                    sudo systemctl enable docker
+                    sudo usermod -aG docker $USER
+                    log_warning "Docker installed. Please log out and back in for group changes to take effect, then re-run this script."
+                    exit 0
+                else
+                    log_error "Package manager not found. Please install Docker manually: https://docs.docker.com/engine/install/"
+                    exit 1
+                fi
+                ;;
+            *)
+                log_error "Unsupported OS. Please install Docker manually: https://docs.docker.com/get-docker/"
+                exit 1
+                ;;
+        esac
+    else
+        log_success "Docker installed: $(docker --version)"
+
+        # Check if Docker daemon is running
+        if ! docker ps &> /dev/null; then
+            log_error "Docker is installed but not running. Please start Docker and try again."
+            if [[ "$OS_TYPE" == "macos" ]]; then
+                log_info "Start Docker Desktop from Applications"
+            elif [[ "$OS_TYPE" == "linux" ]]; then
+                log_info "Run: sudo systemctl start docker"
+            fi
+            exit 1
+        fi
+    fi
+
+    # Check/Install Docker Compose
+    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null 2>&1; then
+        log_info "Docker Compose not found, installing..."
+        case "$OS_TYPE" in
+            macos)
+                if command -v brew &> /dev/null; then
+                    brew install docker-compose
+                else
+                    log_error "Homebrew not found. Docker Compose should come with Docker Desktop."
+                    exit 1
+                fi
+                ;;
+            linux)
+                # Install docker-compose standalone
+                log_info "Installing Docker Compose standalone..."
+                sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+                sudo chmod +x /usr/local/bin/docker-compose
+                ;;
+            *)
+                log_error "Unsupported OS. Please install Docker Compose manually."
+                exit 1
+                ;;
+        esac
+        log_success "Docker Compose installed"
+    else
+        log_success "Docker Compose installed"
+    fi
+
+    # Check/Install make
+    if ! command -v make &> /dev/null; then
+        log_info "Installing make..."
+        case "$OS_TYPE" in
+            macos)
+                # make comes with Xcode Command Line Tools
+                if ! xcode-select -p &> /dev/null; then
+                    log_info "Installing Xcode Command Line Tools (includes make)..."
+                    xcode-select --install
+                    log_warning "Please complete Xcode Command Line Tools installation and re-run this script"
+                    exit 0
+                fi
+                ;;
+            linux)
+                if command -v apt-get &> /dev/null; then
+                    sudo apt-get update && sudo apt-get install -y build-essential
+                elif command -v yum &> /dev/null; then
+                    sudo yum groupinstall -y "Development Tools"
+                elif command -v dnf &> /dev/null; then
+                    sudo dnf groupinstall -y "Development Tools"
+                else
+                    log_error "Package manager not found. Please install make manually."
+                    exit 1
+                fi
+                ;;
+            *)
+                log_error "Unsupported OS. Please install make manually."
+                exit 1
+                ;;
+        esac
+        log_success "make installed"
+    else
+        log_success "make installed: $(make --version | head -n1)"
+    fi
+
+    log_success "All dependencies installed"
+}
+
+# ============================================================================
+# GitHub Authentication
+# ============================================================================
+
+setup_github_auth() {
+    log_header "GitHub Authentication"
+
+    # Check cache for auth type
+    local cached_auth_type=$(load_from_cache "AUTH_TYPE")
+    if [ -n "$cached_auth_type" ]; then
+        AUTH_TYPE="$cached_auth_type"
+        log_info "Using cached authentication method: $AUTH_TYPE"
+    else
+        prompt AUTH_TYPE "Authentication method (ssh/token/none)" "ssh"
+        save_to_cache "AUTH_TYPE" "$AUTH_TYPE"
+    fi
+
+    case "$AUTH_TYPE" in
+        token)
+            prompt_or_cache "GITHUB_TOKEN" "GitHub Personal Access Token" "" true
+            if [ -z "$GITHUB_TOKEN" ]; then
+                log_error "GitHub token is required"
+                log_info "Create token at: https://github.com/settings/tokens"
+                exit 1
+            fi
+            log_success "GitHub token configured"
+            ;;
+        ssh)
+            log_info "Using SSH authentication (ensure keys are configured)"
+            GITHUB_TOKEN=""
+            ;;
+        none)
+            log_info "No authentication (public repos only)"
+            GITHUB_TOKEN=""
+            ;;
+        *)
+            log_error "Invalid auth type: $AUTH_TYPE"
+            exit 1
+            ;;
+    esac
+}
+
+prepare_git_url() {
+    local git_repo=$1
+
+    if [ "$AUTH_TYPE" = "token" ] && [ -n "$GITHUB_TOKEN" ]; then
+        if [[ "$git_repo" =~ ^https://github.com/ ]]; then
+            echo "$git_repo" | sed "s|https://github.com/|https://${GITHUB_TOKEN}@github.com/|"
+            return
+        fi
+    fi
+
+    echo "$git_repo"
+}
+
+# ============================================================================
+# Service Selection
+# ============================================================================
+
+SELECTED_SERVICES=()
+
+select_services() {
+    log_header "Service Selection"
+
+    # Always add mandatory services first
+    for service_def in "${AVAILABLE_SERVICES[@]}"; do
+        IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+        if [ "$mandatory" = "true" ]; then
+            SELECTED_SERVICES+=("$id")
+        fi
+    done
+
+    # Check cache for optional services
+    local cached_services=$(load_from_cache "SELECTED_OPTIONAL_SERVICES")
+    if [ -n "$cached_services" ]; then
+        if [ "$cached_services" != "none" ]; then
+            IFS=',' read -ra optional_services <<< "$cached_services"
+            SELECTED_SERVICES+=("${optional_services[@]}")
+        fi
+        log_info "Using cached service selection: ${SELECTED_SERVICES[*]}"
+        return
+    fi
+
+    echo "Mandatory services: contactdb, dataindex"
+    echo ""
+    echo "Optional services:"
+    echo ""
+
+    local index=1
+    local optional_services=()
+    for service_def in "${AVAILABLE_SERVICES[@]}"; do
+        IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+        if [ "$mandatory" = "false" ]; then
+            echo -e "  ${CYAN}${index}.${NC} ${desc} (${id})"
+            optional_services+=("$service_def")
+            ((index++))
+        fi
+    done
+
+    echo ""
+    prompt SERVICES_INPUT "Enter optional service numbers (comma-separated) or 'none'" "none"
+
+    local selected_optional=()
+    if [ "$SERVICES_INPUT" != "none" ]; then
+        IFS=',' read -ra INDICES <<< "$SERVICES_INPUT"
+        for idx in "${INDICES[@]}"; do
+            idx=$(echo "$idx" | xargs) # trim
+            service_def="${optional_services[$((idx-1))]}"
+            IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+            SELECTED_SERVICES+=("$id")
+            selected_optional+=("$id")
+        done
+    fi
+
+    # Save optional services to cache
+    if [ ${#selected_optional[@]} -gt 0 ]; then
+        local optional_str=$(IFS=','; echo "${selected_optional[*]}")
+        save_to_cache "SELECTED_OPTIONAL_SERVICES" "$optional_str"
+    else
+        save_to_cache "SELECTED_OPTIONAL_SERVICES" "none"
+    fi
+
+    log_success "Selected: ${SELECTED_SERVICES[*]}"
+}
+
+# ============================================================================
+# DataIndex Ingestor Selection
+# ============================================================================
+
+SELECTED_INGESTORS=()
+
+select_ingestors() {
+    log_header "DataIndex Ingestors"
+
+    # Check cache first - use it automatically if it exists
+    local cached_ingestors=$(load_from_cache "SELECTED_INGESTORS")
+    if [ -n "$cached_ingestors" ]; then
+        if [ "$cached_ingestors" = "none" ]; then
+            log_info "Using cached selection: No ingestors"
+            return
+        fi
+        IFS=',' read -ra SELECTED_INGESTORS <<< "$cached_ingestors"
+        log_info "Using cached ingestor selection: ${#SELECTED_INGESTORS[@]} ingestors"
+        return
+    fi
+
+    echo "Available ingestors:"
+    echo ""
+
+    local index=1
+    for ingestor_def in "${DATAINDEX_INGESTORS[@]}"; do
+        IFS='|' read -r id name prefix <<< "$ingestor_def"
+        echo -e "  ${CYAN}${index}.${NC} ${name}"
+        ((index++))
+    done
+
+    echo ""
+    prompt INGESTORS_INPUT "Enter ingestor numbers (comma-separated) or 'none'" "none"
+
+    if [ "$INGESTORS_INPUT" = "none" ]; then
+        log_info "No ingestors selected"
+        save_to_cache "SELECTED_INGESTORS" "none"
+        return
+    fi
+
+    IFS=',' read -ra INDICES <<< "$INGESTORS_INPUT"
+    for idx in "${INDICES[@]}"; do
+        idx=$(echo "$idx" | xargs)
+        ingestor_def="${DATAINDEX_INGESTORS[$((idx-1))]}"
+        IFS='|' read -r id name prefix <<< "$ingestor_def"
+        SELECTED_INGESTORS+=("$id|$name|$prefix")
+    done
+
+    # Save to cache
+    local ingestors_str=$(IFS=','; echo "${SELECTED_INGESTORS[*]}")
+    save_to_cache "SELECTED_INGESTORS" "$ingestors_str"
+
+    log_success "Selected ingestors: ${#SELECTED_INGESTORS[@]}"
+}
+
+# ============================================================================
+# Enrichment API Configuration (Global)
+# ============================================================================
+
+setup_enrichment_apis() {
+    log_header "Contact Enrichment APIs (Optional)"
+
+    log_info "These API keys will be used across ContactDB, CRM Reply, and Meeting Prep"
+    log_info "Press Enter to skip if you don't have these keys"
+    echo ""
+
+    prompt_or_cache "APOLLO_API_KEY" "Apollo API key (optional)" "" true
+    prompt_or_cache "HUNTER_API_KEY" "Hunter API key (optional)" "" true
+
+    if [ -n "$APOLLO_API_KEY" ] || [ -n "$HUNTER_API_KEY" ]; then
+        log_success "Enrichment API keys configured"
+    else
+        log_info "Skipping enrichment API keys - services will work without them"
+    fi
+}
+
+# ============================================================================
+# Service Configuration
+# ============================================================================
+
+configure_contactdb() {
+    log_header "Configuring ContactDB"
+
+    # Use hardcoded password from docker-compose.yml
+    local db_user="contactdb"
+    local db_password="contactdb"
+    local db_name="contactdb"
+    local db_host="postgres"  # Docker service name
+    local db_port="5432"
+    local db_test_host="postgres_test"
+
+    # Generate backend/.env for application settings (matches docker-compose.yml)
+    mkdir -p "$PLATFORM_ROOT/contactdb/backend"
+    cat > "$PLATFORM_ROOT/contactdb/backend/.env" <<EOF
+# ContactDB Application Configuration
+# Database connection (matches docker-compose.yml hardcoded values)
+DATABASE_URL=postgresql://${db_user}:${db_password}@${db_host}:${db_port}/${db_name}
+DATABASE_URL_TEST=postgresql://${db_user}:${db_password}@${db_test_host}:${db_port}/${db_name}_test
+
+# Optional: Override defaults
+# APP_NAME=ContactDB
+# DEBUG=false
+# LOG_SQL=false
+
+# Contact enrichment APIs (optional)
+EOF
+
+    # Add Apollo API key if provided
+    if [ -n "$APOLLO_API_KEY" ]; then
+        echo "APOLLO_API_KEY=$APOLLO_API_KEY" >> "$PLATFORM_ROOT/contactdb/backend/.env"
+    else
+        echo "# APOLLO_API_KEY=" >> "$PLATFORM_ROOT/contactdb/backend/.env"
+    fi
+
+    # Add Hunter API key if provided
+    if [ -n "$HUNTER_API_KEY" ]; then
+        echo "HUNTER_API_KEY=$HUNTER_API_KEY" >> "$PLATFORM_ROOT/contactdb/backend/.env"
+    else
+        echo "# HUNTER_API_KEY=" >> "$PLATFORM_ROOT/contactdb/backend/.env"
+    fi
+
+    log_success "ContactDB configured"
+}
+
+configure_dataindex() {
+    log_header "Configuring DataIndex"
+
+    # Always prompt for ingestors (unless cached)
+    select_ingestors
+
+    # Auto-add babelfish ingestor if babelfish service is selected
+    local has_babelfish=false
+    for service_id in "${SELECTED_SERVICES[@]}"; do
+        if [ "$service_id" = "babelfish" ]; then
+            # Check if babelfish ingestor is already in the list
+            if [ ${#SELECTED_INGESTORS[@]} -gt 0 ]; then
+                for ing in "${SELECTED_INGESTORS[@]}"; do
+                    if [[ "$ing" == babelfish* ]]; then
+                        has_babelfish=true
+                        break
+                    fi
+                done
+            fi
+
+            if [ "$has_babelfish" = false ]; then
+                SELECTED_INGESTORS+=("babelfish|Babelfish (auto-configured)|DATAINDEX_BABELFISH")
+                log_info "Auto-added Babelfish ingestor for DataIndex"
+            fi
+            break
+        fi
+    done
+
+    # Required variables - check existing .env file if cache is empty
+    prompt_or_cache "DATAINDEX_POSTGRES_PASSWORD" "PostgreSQL password for DataIndex" "auto" true "$PLATFORM_ROOT/dataindex/.env"
+    prompt_or_cache "CONTACTDB_URL_FRONTEND" "ContactDB Frontend URL" "http://localhost:42173" false "$PLATFORM_ROOT/dataindex/.env"
+
+    # Generate base .env
+    cat > "$PLATFORM_ROOT/dataindex/.env" <<EOF
+# DataIndex Configuration
+CONTACTDB_URL=http://host.docker.internal:42800
+CONTACTDB_URL_FRONTEND=$CONTACTDB_URL_FRONTEND
+REDIS_URL=redis://localhost:42170
+DATABASE_URL=postgresql://dataindex:$DATAINDEX_POSTGRES_PASSWORD@localhost:42434/dataindex
+
+# Ingestors
+EOF
+
+    # Configure each selected ingestor
+    if [ ${#SELECTED_INGESTORS[@]} -gt 0 ]; then
+        for ingestor_def in "${SELECTED_INGESTORS[@]}"; do
+            IFS='|' read -r id name prefix <<< "$ingestor_def"
+
+            case "$id" in
+                calendar)
+                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
+                    echo "# ICS Calendar Ingestor" >> "$PLATFORM_ROOT/dataindex/.env"
+                    prompt_or_cache "DATAINDEX_CALENDAR_URL" "ICS Calendar URL (e.g., Fastmail Calendar iCal)" ""
+                    if [ -n "$DATAINDEX_CALENDAR_URL" ]; then
+                        echo "${prefix}_TYPE=ics_calendar" >> "$PLATFORM_ROOT/dataindex/.env"
+                        echo "${prefix}_ICS_URL=$DATAINDEX_CALENDAR_URL" >> "$PLATFORM_ROOT/dataindex/.env"
+                    fi
+                    ;;
+
+                zulip)
+                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
+                    echo "# Zulip Ingestor" >> "$PLATFORM_ROOT/dataindex/.env"
+                    prompt_or_cache "DATAINDEX_ZULIP_URL" "Zulip server URL" ""
+                    prompt_or_cache "DATAINDEX_ZULIP_EMAIL" "Zulip bot email" ""
+                    prompt_or_cache "DATAINDEX_ZULIP_API_KEY" "Zulip API key" "" true
+
+                    if [ -n "$DATAINDEX_ZULIP_URL" ]; then
+                        echo "${prefix}_TYPE=zulip" >> "$PLATFORM_ROOT/dataindex/.env"
+                        echo "${prefix}_ZULIP_URL=$DATAINDEX_ZULIP_URL" >> "$PLATFORM_ROOT/dataindex/.env"
+                        echo "${prefix}_ZULIP_EMAIL=$DATAINDEX_ZULIP_EMAIL" >> "$PLATFORM_ROOT/dataindex/.env"
+                        echo "${prefix}_ZULIP_API_KEY=$DATAINDEX_ZULIP_API_KEY" >> "$PLATFORM_ROOT/dataindex/.env"
+                    fi
+                    ;;
+
+                email)
+                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
+                    echo "# Email Ingestor" >> "$PLATFORM_ROOT/dataindex/.env"
+                    prompt_or_cache "DATAINDEX_EMAIL_IMAP_HOST" "IMAP host (e.g., imap.fastmail.com)" "imap.fastmail.com"
+                    prompt_or_cache "DATAINDEX_EMAIL_IMAP_USER" "IMAP username/email" ""
+                    prompt_or_cache "DATAINDEX_EMAIL_IMAP_PASS" "IMAP password" "" true
+
+                    if [ -n "$DATAINDEX_EMAIL_IMAP_HOST" ]; then
+                        echo "${prefix}_TYPE=mbsync_email" >> "$PLATFORM_ROOT/dataindex/.env"
+                        echo "${prefix}_IMAP_HOST=$DATAINDEX_EMAIL_IMAP_HOST" >> "$PLATFORM_ROOT/dataindex/.env"
+                        echo "${prefix}_IMAP_USER=$DATAINDEX_EMAIL_IMAP_USER" >> "$PLATFORM_ROOT/dataindex/.env"
+                        echo "${prefix}_IMAP_PASS=$DATAINDEX_EMAIL_IMAP_PASS" >> "$PLATFORM_ROOT/dataindex/.env"
+                    fi
+                    ;;
+
+                reflector)
+                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
+                    echo "# Reflector Ingestor" >> "$PLATFORM_ROOT/dataindex/.env"
+                    prompt_or_cache "DATAINDEX_REFLECTOR_API_KEY" "Reflector API key" "" true
+                    prompt_or_cache "DATAINDEX_REFLECTOR_API_URL" "Reflector API URL" "https://api-reflector.monadical.com"
+
+                    if [ -n "$DATAINDEX_REFLECTOR_API_KEY" ]; then
+                        echo "${prefix}_TYPE=reflector" >> "$PLATFORM_ROOT/dataindex/.env"
+                        echo "${prefix}_API_KEY=$DATAINDEX_REFLECTOR_API_KEY" >> "$PLATFORM_ROOT/dataindex/.env"
+                        echo "${prefix}_API_URL=$DATAINDEX_REFLECTOR_API_URL" >> "$PLATFORM_ROOT/dataindex/.env"
+                    fi
+                    ;;
+
+                babelfish)
+                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
+                    echo "# Babelfish Ingestor (auto-configured)" >> "$PLATFORM_ROOT/dataindex/.env"
+                    # Auto-configured, no prompt needed
+                    local babelfish_url="http://host.docker.internal:8000"
+                    echo "${prefix}_TYPE=babelfish" >> "$PLATFORM_ROOT/dataindex/.env"
+                    echo "${prefix}_BASE_URL=$babelfish_url" >> "$PLATFORM_ROOT/dataindex/.env"
+                    log_info "Babelfish ingestor configured with URL: $babelfish_url"
+                    ;;
+            esac
+        done
+    fi
+
+    log_success "DataIndex configured"
+}
+
+# ============================================================================
+# Repository Management
+# ============================================================================
+
+clone_services() {
+    log_header "Cloning Repositories"
+
+    mkdir -p "$PLATFORM_ROOT"
+
+    for service_id in "${SELECTED_SERVICES[@]}"; do
+        # Find service definition
+        for service_def in "${AVAILABLE_SERVICES[@]}"; do
+            IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+
+            if [ "$id" = "$service_id" ]; then
+                if [ -d "$PLATFORM_ROOT/$id/.git" ]; then
+                    log_info "$id already cloned, pulling latest changes..."
+                    cd "$PLATFORM_ROOT/$id"
+                    git pull 2>&1 | grep -v "password" || {
+                        log_warning "Failed to pull latest changes for $id (might be on a different branch or have local changes)"
+                    }
+                    cd "$PLATFORM_ROOT"
+                    log_success "Updated $id"
+                else
+                    log_info "Cloning $id from $repo..."
+                    local auth_url=$(prepare_git_url "$repo")
+                    git clone -b "$branch" "$auth_url" "$PLATFORM_ROOT/$id" 2>&1 | grep -v "password" || {
+                        log_error "Failed to clone $id"
+                        exit 1
+                    }
+                    log_success "Cloned $id"
+                fi
+                break
+            fi
+        done
+    done
+}
+
+configure_babelfish() {
+    log_header "Configuring Babelfish"
+
+    # Generate passwords - check existing .env file if cache is empty
+    prompt_or_cache "BABELFISH_POSTGRES_PASSWORD" "PostgreSQL password for Babelfish" "auto" true "$PLATFORM_ROOT/babelfish/.env"
+    prompt_or_cache "BABELFISH_BACKUP_KEY" "Backup encryption key for Babelfish" "auto" true "$PLATFORM_ROOT/babelfish/.env"
+
+    # Matrix server name (use localhost for local development)
+    local MATRIX_SERVER_NAME="localhost"
+
+    # Generate .env
+    cat > "$PLATFORM_ROOT/babelfish/.env" <<EOF
+# Babelfish Configuration
+MATRIX_SERVER_NAME=$MATRIX_SERVER_NAME
+MATRIX_ADMIN_USER=admin
+POSTGRES_HOST=postgres
+POSTGRES_PORT=5433
+POSTGRES_PASSWORD=$BABELFISH_POSTGRES_PASSWORD
+CENTRAL_DB_HOST=babelfish-central-db
+CENTRAL_DB_PORT=5432
+CENTRAL_DB_NAME=babelfish_central
+CENTRAL_DB_PASSWORD=$BABELFISH_POSTGRES_PASSWORD
+MATRIX_DB_HOST=postgres
+MATRIX_DB_PORT=5432
+MATRIX_DB_NAME=synapse
+MATRIX_DB_PASSWORD=$BABELFISH_POSTGRES_PASSWORD
+SYNC_INTERVAL=300
+SYNC_BATCH_SIZE=1000
+PARALLEL_BRIDGES=true
+ENABLE_EMBEDDINGS=true
+FULL_SYNC_ON_STARTUP=true
+ENABLE_DATABASE_DISCOVERY=true
+WHATSAPP_ENABLED=true
+DISCORD_ENABLED=true
+SLACK_ENABLED=true
+TELEGRAM_ENABLED=false
+META_ENABLED=true
+SIGNAL_ENABLED=false
+LINKEDIN_ENABLED=false
+TELEGRAM_API_ID=
+TELEGRAM_API_HASH=
+API_PORT=8000
+LOG_LEVEL=INFO
+API_CORS_ORIGINS=http://localhost:8880,http://localhost:8448,http://localhost:3000,http://localhost:3001
+API_MAX_RESULTS=1000
+FASTAPI_RELOAD=true
+BACKUP_ENCRYPTION_KEY=$BABELFISH_BACKUP_KEY
+BACKUP_DESTINATION=./backups
+EOF
+
+    log_success "Babelfish configured"
+}
+
+configure_crm_reply() {
+    log_header "Configuring CRM Reply"
+
+    # Generate passwords - check existing .env file if cache is empty
+    prompt_or_cache "CRM_POSTGRES_PASSWORD" "PostgreSQL password for CRM Reply" "auto" true "$PLATFORM_ROOT/crm-reply/.env"
+
+    # LLM Provider selection
+    prompt_or_cache "CRM_LLM_PROVIDER" "LLM provider (anthropic/litellm)" "litellm"
+
+    if [ "$CRM_LLM_PROVIDER" = "litellm" ]; then
+        prompt_or_cache "LITELLM_API_KEY" "LiteLLM API key" "" true
+        prompt_or_cache "LITELLM_BASE_URL" "LiteLLM base URL" "https://litellm.app.monadical.io/v1"
+        prompt_or_cache "LITELLM_MODEL" "LiteLLM model" "GLM-4.5-Air-FP8-dev"
+    elif [ "$CRM_LLM_PROVIDER" = "anthropic" ]; then
+        prompt_or_cache "ANTHROPIC_API_KEY" "Anthropic API key" "" true
+    fi
+
+    # Generate .env
+    cat > "$PLATFORM_ROOT/crm-reply/.env" <<EOF
+# CRM Reply Configuration
+POSTGRES_PASSWORD=$CRM_POSTGRES_PASSWORD
+CENTRAL_DB_URL=postgresql+asyncpg://postgres:$CRM_POSTGRES_PASSWORD@crm-reply-postgres:5432/babelfish_core
+QDRANT_URL=http://crm-reply-qdrant:6333
+REDIS_URL=redis://crm-reply-redis:6379/0
+CELERY_BROKER_URL=redis://crm-reply-redis:6379/0
+CELERY_RESULT_BACKEND=redis://crm-reply-redis:6379/0
+LOG_LEVEL=INFO
+ENABLE_EMBEDDINGS=true
+ENABLE_LLM_URGENCY=true
+ENABLE_AUTO_RESPONSES=true
+AUTO_SEND_RESPONSES=false
+AUTO_SEND_CONFIDENCE_THRESHOLD=80
+API_CORS_ORIGINS=http://localhost:3000,http://localhost:3001
+LLM_PROVIDER=$CRM_LLM_PROVIDER
+POPULATE_DEMO_DATA=false
+EOF
+
+    # Add LLM-specific config
+    if [ "$CRM_LLM_PROVIDER" = "litellm" ]; then
+        cat >> "$PLATFORM_ROOT/crm-reply/.env" <<EOF
+LITELLM_API_KEY=$LITELLM_API_KEY
+LITELLM_BASE_URL=$LITELLM_BASE_URL
+LITELLM_MODEL=$LITELLM_MODEL
+EOF
+    elif [ "$CRM_LLM_PROVIDER" = "anthropic" ]; then
+        cat >> "$PLATFORM_ROOT/crm-reply/.env" <<EOF
+ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+EOF
+    fi
+
+    # Add enrichment API keys
+    cat >> "$PLATFORM_ROOT/crm-reply/.env" <<EOF
+
+# Contact enrichment APIs (optional)
+EOF
+
+    if [ -n "$APOLLO_API_KEY" ]; then
+        echo "APOLLO_API_KEY=$APOLLO_API_KEY" >> "$PLATFORM_ROOT/crm-reply/.env"
+    else
+        echo "# APOLLO_API_KEY=" >> "$PLATFORM_ROOT/crm-reply/.env"
+    fi
+
+    if [ -n "$HUNTER_API_KEY" ]; then
+        echo "HUNTER_API_KEY=$HUNTER_API_KEY" >> "$PLATFORM_ROOT/crm-reply/.env"
+    else
+        echo "# HUNTER_API_KEY=" >> "$PLATFORM_ROOT/crm-reply/.env"
+    fi
+
+    log_success "CRM Reply configured"
+}
+
+configure_meeting_prep() {
+    log_header "Configuring Meeting Prep"
+
+    # Generate passwords and secrets - check existing .env file if cache is empty
+    prompt_or_cache "MEETING_POSTGRES_PASSWORD" "PostgreSQL password for Meeting Prep" "postgres" true "$PLATFORM_ROOT/meeting-prep/.env"
+    
+    # Prompt for production URLs (public URLs only)
+    prompt_or_cache "MEETING_FRONTEND_URL" "Meeting Prep Frontend URL" "http://localhost:8081" false "$PLATFORM_ROOT/meeting-prep/.env"
+    prompt_or_cache "MEETING_BACKEND_URL" "Meeting Prep Backend URL" "http://localhost:8001" false "$PLATFORM_ROOT/meeting-prep/.env"
+    
+    # Prompt for DataIndex public URL (for browser-clickable links)
+    prompt_or_cache "DATAINDEX_PUBLIC_URL" "DataIndex public URL (for browser links)" "http://localhost:42180" false "$PLATFORM_ROOT/meeting-prep/.env"
+    
+    # Construct CORS origins from frontend URL
+    local CORS_ORIGINS="${MEETING_FRONTEND_URL},http://localhost:5173,http://localhost:5174"
+    
+    # Prompt for LiteLLM configuration
+    prompt_or_cache "LITELLM_API_KEY" "LiteLLM API key" "" true "$PLATFORM_ROOT/meeting-prep/.env"
+    prompt_or_cache "LITELLM_BASE_URL" "LiteLLM base URL" "https://litellm.app.monadical.io/v1/" false "$PLATFORM_ROOT/meeting-prep/.env"
+    prompt_or_cache "DEFAULT_LLM_MODEL" "Default LLM model" "zai-org/GLM-4.5-Air-FP8" false "$PLATFORM_ROOT/meeting-prep/.env"
+
+    # Generate .env
+    cat > "$PLATFORM_ROOT/meeting-prep/.env" <<EOF
+# Meeting Prep Configuration
+
+# =============================================================================
+# Database Configuration
+# =============================================================================
+DATABASE_URL=postgresql+asyncpg://postgres:${MEETING_POSTGRES_PASSWORD}@meeting-prep-postgres-1:5432/meeting_prep
+
+# =============================================================================
+# Production URLs (for Pangolin deployment)
+# =============================================================================
+
+# Frontend URL (exposed via Pangolin)
+FRONTEND_URL=${MEETING_FRONTEND_URL}
+
+# Backend URL (exposed via Pangolin)
+BACKEND_URL=${MEETING_BACKEND_URL}
+
+# CORS Configuration - include your production frontend URL
+CORS_ORIGINS=${CORS_ORIGINS}
+
+# Apollo API Configuration
+APOLLO_API_URL=https://api.apollo.io/v1
+EOF
+
+    # Add Apollo API key if provided
+    if [ -n "$APOLLO_API_KEY" ]; then
+        echo "APOLLO_API_KEY=$APOLLO_API_KEY" >> "$PLATFORM_ROOT/meeting-prep/.env"
+    else
+        echo "# APOLLO_API_KEY=" >> "$PLATFORM_ROOT/meeting-prep/.env"
+    fi
+
+    # Add LiteLLM configuration
+    cat >> "$PLATFORM_ROOT/meeting-prep/.env" <<EOF
+
+# LiteLLM Configuration
+LITELLM_API_KEY=${LITELLM_API_KEY}
+LITELLM_BASE_URL=${LITELLM_BASE_URL}
+DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL}
+
+# DataIndex Public URL - for browser-clickable links in the UI
+# Backend automatically uses http://host.docker.internal:42180 for API calls
+DATAINDEX_PUBLIC_URL=${DATAINDEX_PUBLIC_URL}
+
+# Note: ContactDB backend access is automatic via host.docker.internal:42800
+# Frontend automatically uses BACKEND_URL for API calls (via docker-compose)
+EOF
+
+    log_success "Meeting Prep configured"
+}
+
+configure_all_services() {
+    for service_id in "${SELECTED_SERVICES[@]}"; do
+        case "$service_id" in
+            contactdb)
+                configure_contactdb
+                ;;
+            dataindex)
+                configure_dataindex
+                ;;
+            babelfish)
+                configure_babelfish
+                ;;
+            crm-reply)
+                configure_crm_reply
+                ;;
+            meeting-prep)
+                configure_meeting_prep
+                ;;
+            *)
+                log_warning "No configuration function for $service_id"
+                ;;
+        esac
+    done
+}
+
+# ============================================================================
+# Docker Network
+# ============================================================================
+
+setup_docker_network() {
+    log_header "Setting Up Docker Network"
+
+    if docker network inspect "$DOCKER_NETWORK" &> /dev/null; then
+        log_info "Network $DOCKER_NETWORK already exists"
+    else
+        docker network create "$DOCKER_NETWORK"
+        log_success "Created network $DOCKER_NETWORK"
+    fi
+}
+
+# ============================================================================
+# Service Startup
+# ============================================================================
+
+# Global variable to track if services were started
+SERVICES_STARTED=false
+
+start_services() {
+    log_header "Starting Services"
+
+    # Always prompt - don't cache this preference
+    prompt START_NOW "Start services now?" "yes"
+
+    if [ "$START_NOW" != "yes" ] && [ "$START_NOW" != "y" ]; then
+        log_info "Skipping service startup"
+        SERVICES_STARTED=false
+        return
+    fi
+
+    SERVICES_STARTED=true
+
+    # Use initial_service_setup for first-time install (runs make setup where needed)
+    # Start in dependency order: contactdb first, then others
+    for service_id in "${SELECTED_SERVICES[@]}"; do
+        if [ "$service_id" = "contactdb" ]; then
+            initial_service_setup "$service_id"
+        fi
+    done
+
+    for service_id in "${SELECTED_SERVICES[@]}"; do
+        if [ "$service_id" != "contactdb" ]; then
+            initial_service_setup "$service_id"
+        fi
+    done
+}
+
+start_service() {
+    local service_id=$1
+    local service_path="$PLATFORM_ROOT/$service_id"
+
+    # Check if service directory exists
+    if [ ! -d "$service_path" ]; then
+        log_error "Service $service_id not found at $service_path"
+        return 1
+    fi
+
+    log_info "Starting $service_id..."
+
+    cd "$service_path"
+
+    if [ -f "docker-compose.yml" ]; then
+        # Just start services without rebuilding
+        docker_compose up -d 2>&1 | grep -v "password" || {
+            log_error "Failed to start $service_id"
+            docker_compose logs --tail=50
+            cd "$PLATFORM_ROOT"
+            return 1
+        }
+    else
+        log_warning "No docker-compose.yml found for $service_id"
+    fi
+
+    cd "$PLATFORM_ROOT"
+    log_success "$service_id started"
+}
+
+# Initial setup for a service (builds and starts on first run)
+initial_service_setup() {
+    local service_id=$1
+    local service_path="$PLATFORM_ROOT/$service_id"
+
+    if [ ! -d "$service_path" ]; then
+        log_error "Service $service_id not found at $service_path"
+        return 1
+    fi
+
+    cd "$service_path"
+
+    # Babelfish needs make setup for bridge configuration
+    if [ "$service_id" = "babelfish" ]; then
+        log_info "Running initial setup for babelfish..."
+        if ! make setup 2>&1; then
+            log_error "make setup failed for babelfish"
+            log_info "Check that .env file exists and contains required variables"
+            cd "$PLATFORM_ROOT"
+            return 1
+        fi
+        log_success "Babelfish setup completed"
+        
+        # Babelfish's make setup doesn't start services, so start them
+        log_info "Starting babelfish services..."
+        docker_compose up -d 2>&1 | grep -v "password" || {
+            log_error "Failed to start $service_id"
+            docker_compose logs --tail=50
+            cd "$PLATFORM_ROOT"
+            return 1
+        }
+    else
+        # All other services: just build and start directly
+        log_info "Building and starting $service_id..."
+        if [ -f "docker-compose.yml" ]; then
+            docker_compose up -d --build 2>&1 | grep -v "password" || {
+                log_error "Failed to build and start $service_id"
+                docker_compose logs --tail=50
+                cd "$PLATFORM_ROOT"
+                return 1
+            }
+        else
+            log_warning "No docker-compose.yml found for $service_id"
+            cd "$PLATFORM_ROOT"
+            return 1
+        fi
+    fi
+
+    cd "$PLATFORM_ROOT"
+    log_success "$service_id built and started"
+}
+
+stop_service() {
+    local service_id=$1
+    local service_path="$PLATFORM_ROOT/$service_id"
+
+    # Check if service directory exists
+    if [ ! -d "$service_path" ]; then
+        log_error "Service $service_id not found at $service_path"
+        return 1
+    fi
+
+    log_info "Stopping $service_id..."
+
+    cd "$service_path"
+
+    if [ -f "docker-compose.yml" ]; then
+        docker_compose down 2>&1 | grep -v "password" || {
+            log_error "Failed to stop $service_id"
+            cd "$PLATFORM_ROOT"
+            return 1
+        }
+    else
+        log_warning "No docker-compose.yml found for $service_id"
+    fi
+
+    cd "$PLATFORM_ROOT"
+    log_success "$service_id stopped"
+}
+
+update_service() {
+    local service_id=$1
+    local service_path="$PLATFORM_ROOT/$service_id"
+
+    # Check if service directory exists
+    if [ ! -d "$service_path" ]; then
+        log_error "Service $service_id not found at $service_path"
+        return 1
+    fi
+
+    log_info "Updating $service_id..."
+
+    # Stop service
+    stop_service "$service_id" || return 1
+
+    # Pull latest changes
+    log_info "Pulling latest changes for $service_id..."
+    cd "$service_path"
+    git pull 2>&1 | grep -v "password" || {
+        log_warning "Failed to pull latest changes for $service_id"
+    }
+
+    # Rebuild and start
+    log_info "Rebuilding and starting $service_id..."
+
+    if [ -f "docker-compose.yml" ]; then
+        docker_compose up -d --build 2>&1 | grep -v "password" || {
+            log_error "Failed to build and start $service_id"
+            docker_compose logs --tail=50
+            cd "$PLATFORM_ROOT"
+            return 1
+        }
+    else
+        log_warning "No docker-compose.yml found for $service_id"
+    fi
+
+    cd "$PLATFORM_ROOT"
+    log_success "$service_id updated"
+}
+
+# ============================================================================
+# Service Management Commands
+# ============================================================================
+
+get_configured_services() {
+    # Get list of configured services (directories that exist in platform root)
+    local configured=()
+    for service_def in "${AVAILABLE_SERVICES[@]}"; do
+        IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+        if [ -d "$PLATFORM_ROOT/$id" ]; then
+            configured+=("$id")
+        fi
+    done
+    echo "${configured[@]}"
+}
+
+cmd_start() {
+    local service_name=$1
+
+    if [ -z "$service_name" ]; then
+        log_error "Usage: $0 start <service|all>"
+        echo ""
+        echo "Configured services:"
+        for svc in $(get_configured_services); do
+            echo "  - $svc"
+        done
+        exit 1
+    fi
+
+    if [ "$service_name" = "all" ]; then
+        log_header "Starting All Services"
+        local services=($(get_configured_services))
+
+        # Start contactdb first if it exists
+        for svc in "${services[@]}"; do
+            if [ "$svc" = "contactdb" ]; then
+                start_service "$svc"
+            fi
+        done
+
+        # Start others
+        for svc in "${services[@]}"; do
+            if [ "$svc" != "contactdb" ]; then
+                start_service "$svc"
+            fi
+        done
+    else
+        start_service "$service_name"
+    fi
+}
+
+cmd_stop() {
+    local service_name=$1
+
+    if [ -z "$service_name" ]; then
+        log_error "Usage: $0 stop <service|all>"
+        echo ""
+        echo "Configured services:"
+        for svc in $(get_configured_services); do
+            echo "  - $svc"
+        done
+        exit 1
+    fi
+
+    if [ "$service_name" = "all" ]; then
+        log_header "Stopping All Services"
+        for svc in $(get_configured_services); do
+            stop_service "$svc"
+        done
+    else
+        stop_service "$service_name"
+    fi
+}
+
+cmd_update() {
+    local service_name=$1
+
+    if [ -z "$service_name" ]; then
+        log_error "Usage: $0 update <service|all>"
+        echo ""
+        echo "Configured services:"
+        for svc in $(get_configured_services); do
+            echo "  - $svc"
+        done
+        exit 1
+    fi
+
+    if [ "$service_name" = "all" ]; then
+        log_header "Updating All Services"
+        local services=($(get_configured_services))
+
+        # Update contactdb first if it exists
+        for svc in "${services[@]}"; do
+            if [ "$svc" = "contactdb" ]; then
+                update_service "$svc"
+            fi
+        done
+
+        # Update others
+        for svc in "${services[@]}"; do
+            if [ "$svc" != "contactdb" ]; then
+                update_service "$svc"
+            fi
+        done
+    else
+        update_service "$service_name"
+    fi
+}
+
+cmd_enable() {
+    local service_name=$1
+
+    if [ -z "$service_name" ]; then
+        log_error "Usage: $0 enable <service>"
+        echo ""
+        echo "Available services to enable:"
+        for service_def in "${AVAILABLE_SERVICES[@]}"; do
+            IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+            if [ "$mandatory" = "false" ] && [ ! -d "$PLATFORM_ROOT/$id" ]; then
+                echo "  - $id: $desc"
+            fi
+        done
+        exit 1
+    fi
+
+    # Check if service is valid
+    local service_found=false
+    local service_info=""
+    for service_def in "${AVAILABLE_SERVICES[@]}"; do
+        IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+        if [ "$id" = "$service_name" ]; then
+            service_found=true
+            service_info="$service_def"
+            break
+        fi
+    done
+
+    if [ "$service_found" = false ]; then
+        log_error "Unknown service: $service_name"
+        exit 1
+    fi
+
+    # Check if already enabled
+    if [ -d "$PLATFORM_ROOT/$service_name" ]; then
+        log_warning "Service $service_name is already enabled"
+        echo ""
+        echo "To start it, use: $0 start $service_name"
+        echo ""
+        exit 0
+    fi
+
+    log_header "Enabling Service: $service_name"
+
+    # Initialize cache if needed
+    init_cache
+    setup_github_auth
+    setup_enrichment_apis
+
+    # Add to selected services
+    SELECTED_SERVICES=("$service_name")
+
+    # Clone the service
+    clone_services
+
+    # Configure the service
+    case "$service_name" in
+        babelfish)
+            configure_babelfish
+            ;;
+        crm-reply)
+            configure_crm_reply
+            ;;
+        meeting-prep)
+            configure_meeting_prep
+            ;;
+        dataindex)
+            configure_dataindex
+            ;;
+        contactdb)
+            configure_contactdb
+            ;;
+        *)
+            log_warning "No configuration function for $service_name"
+            ;;
+    esac
+
+    # Update cache to include this service in optional services
+    local cached_services=$(load_from_cache "SELECTED_OPTIONAL_SERVICES")
+    if [ -z "$cached_services" ] || [ "$cached_services" = "none" ]; then
+        save_to_cache "SELECTED_OPTIONAL_SERVICES" "$service_name"
+    else
+        # Check if not already in cache
+        if [[ ",$cached_services," != *",$service_name,"* ]]; then
+            save_to_cache "SELECTED_OPTIONAL_SERVICES" "$cached_services,$service_name"
+        fi
+    fi
+
+    # Ask if user wants to start the service
+    prompt START_NOW "Start $service_name now?" "yes"
+    if [ "$START_NOW" = "yes" ] || [ "$START_NOW" = "y" ]; then
+        initial_service_setup "$service_name"
+    fi
+
+    log_success "Service $service_name enabled successfully!"
+}
+
+cmd_disable() {
+    local service_name=$1
+
+    if [ -z "$service_name" ]; then
+        log_error "Usage: $0 disable <service>"
+        echo ""
+        echo "Configured services:"
+        for svc in $(get_configured_services); do
+            echo "  - $svc"
+        done
+        exit 1
+    fi
+
+    # Check if service is configured
+    if [ ! -d "$PLATFORM_ROOT/$service_name" ]; then
+        log_error "Service $service_name is not enabled"
+        exit 1
+    fi
+
+    # Check if it's a mandatory service
+    for service_def in "${AVAILABLE_SERVICES[@]}"; do
+        IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+        if [ "$id" = "$service_name" ] && [ "$mandatory" = "true" ]; then
+            log_error "Cannot disable mandatory service: $service_name"
+            exit 1
+        fi
+    done
+
+    log_header "Disabling Service: $service_name"
+
+    # Stop the service if it's running
+    stop_service "$service_name"
+
+    # Ask if user wants to remove the directory
+    prompt REMOVE_DIR "Remove $service_name directory?" "no"
+    if [ "$REMOVE_DIR" = "yes" ] || [ "$REMOVE_DIR" = "y" ]; then
+        log_info "Removing $PLATFORM_ROOT/$service_name..."
+        rm -rf "$PLATFORM_ROOT/$service_name"
+        log_success "Directory removed"
+    else
+        log_info "Service stopped but directory preserved at $PLATFORM_ROOT/$service_name"
+    fi
+
+    # Update cache to remove this service from optional services
+    init_cache
+    local cached_services=$(load_from_cache "SELECTED_OPTIONAL_SERVICES")
+    if [ -n "$cached_services" ] && [ "$cached_services" != "none" ]; then
+        # Remove service from comma-separated list
+        local new_services=$(echo "$cached_services" | tr ',' '\n' | grep -v "^$service_name$" | tr '\n' ',' | sed 's/,$//')
+        if [ -z "$new_services" ]; then
+            save_to_cache "SELECTED_OPTIONAL_SERVICES" "none"
+        else
+            save_to_cache "SELECTED_OPTIONAL_SERVICES" "$new_services"
+        fi
+    fi
+
+    log_success "Service $service_name disabled"
+}
+
+# ============================================================================
+# Status Display
+# ============================================================================
+
+show_status() {
+    log_header "Platform Status"
+
+    echo -e "${CYAN}Services:${NC}"
+
+    # Services to display URLs for (only if running)
+    local url_services=("contactdb" "babelfish" "crm-reply" "meeting-prep")
+
+    for service_def in "${AVAILABLE_SERVICES[@]}"; do
+        IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+
+        # Check if selected
+        local selected=false
+        for selected_id in "${SELECTED_SERVICES[@]}"; do
+            if [ "$selected_id" = "$id" ]; then
+                selected=true
+                break
+            fi
+        done
+
+        if [ "$selected" = true ]; then
+            if [ "$SERVICES_STARTED" = true ]; then
+                # Services are running - show checkmark and URLs
+                echo -e "  ${GREEN}✓${NC} $desc"
+
+                # Only display URL for specific services
+                local show_url=false
+                for url_service in "${url_services[@]}"; do
+                    if [ "$url_service" = "$id" ]; then
+                        show_url=true
+                        break
+                    fi
+                done
+
+                if [ "$show_url" = true ]; then
+                    echo -e "    ${BLUE}http://localhost:$port${NC}"
+                fi
+            else
+                # Services are configured but not started
+                echo -e "  ${BLUE}ℹ${NC} $desc (configured, not started)"
+            fi
+        fi
+    done
+
+    echo ""
+    log_info "Workspace: $PLATFORM_ROOT"
+    log_info "Docker network: $DOCKER_NETWORK"
+    echo ""
+
+    if [ "$SERVICES_STARTED" = false ]; then
+        echo "To manage services:"
+        echo "  $0 start <service|all>    # Start services"
+        echo "  $0 stop <service|all>     # Stop services"
+        echo "  $0 update <service|all>   # Update services (pull, rebuild, restart)"
+        echo "  $0 enable <service>       # Enable a new service"
+        echo "  $0 disable <service>      # Disable a service"
+        echo "  $0 status                 # Show service status"
+        echo ""
+    fi
+}
+
+show_running_status() {
+    log_header "Platform Status - Running Services"
+
+    # Services to display URLs for
+    local url_services=("contactdb" "babelfish" "crm-reply" "meeting-prep")
+
+    for service_def in "${AVAILABLE_SERVICES[@]}"; do
+        IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+
+        # Check if service directory exists (service was configured)
+        if [ ! -d "$PLATFORM_ROOT/$id" ]; then
+            continue
+        fi
+
+        # Use service id as container name pattern
+        local container_pattern="$id"
+        local running_containers=$(docker ps --filter "name=${container_pattern}" --format "{{.Names}}" 2>/dev/null | wc -l | xargs)
+        local total_containers=$(docker ps -a --filter "name=${container_pattern}" --format "{{.Names}}" 2>/dev/null | wc -l | xargs)
+
+        # Skip if service has no containers at all (not deployed)
+        if [ "$total_containers" -eq 0 ]; then
+            continue
+        fi
+
+        if [ "$running_containers" -gt 0 ]; then
+            # Service has running containers
+            echo -e "  ${GREEN}✓${NC} $desc"
+
+            # Show container status summary
+            echo -e "    Containers: ${GREEN}${running_containers}${NC}/${total_containers} running"
+
+            # Only display URL for specific services
+            local show_url=false
+            for url_service in "${url_services[@]}"; do
+                if [ "$url_service" = "$id" ]; then
+                    show_url=true
+                    break
+                fi
+            done
+
+            if [ "$show_url" = true ]; then
+                echo -e "    URL: ${BLUE}http://localhost:$port${NC}"
+            fi
+        else
+            # Service configured but not running
+            echo -e "  ${YELLOW}⚠${NC} $desc (stopped)"
+            echo -e "    Containers: ${YELLOW}0${NC}/${total_containers} running"
+        fi
+    done
+
+    echo ""
+    log_info "Workspace: $PLATFORM_ROOT"
+    log_info "Docker network: $DOCKER_NETWORK"
+    echo ""
+    echo "To manage services:"
+    echo "  $0 start <service|all>    # Start services"
+    echo "  $0 stop <service|all>     # Stop services"
+    echo "  $0 update <service|all>   # Update services (pull, rebuild, restart)"
+    echo "  $0 enable <service>       # Enable a new service"
+    echo "  $0 disable <service>      # Disable a service"
+    echo "  $0 status                 # Show service status"
+    echo ""
+}
+
+# ============================================================================
+# Main Installation Flow
+# ============================================================================
+
+install() {
+    log_header "Installing $PLATFORM_NAME"
+
+    check_dependencies
+    init_cache
+    setup_github_auth
+    setup_enrichment_apis
+    select_services
+    clone_services
+    configure_all_services
+    setup_docker_network
+    start_services
+    show_status
+
+    log_success "Installation complete!"
+    echo ""
+    log_info "To manage your platform:"
+    echo "  cd $PLATFORM_ROOT"
+    echo "  docker compose -f <service>/docker-compose.yml logs"
+    echo "  # Or use docker-compose if you have v1 installed"
+    echo ""
+}
+
+# ============================================================================
+# Command Handling
+# ============================================================================
+
+show_usage() {
+    echo "Monadical Platform Setup"
+    echo ""
+    echo "Usage: $0 [command] [options]"
+    echo ""
+    echo "Commands:"
+    echo "  install              - Install platform (default)"
+    echo "  status               - Show running services and container statuses"
+    echo "  start <service|all>  - Start specific service or all services"
+    echo "  stop <service|all>   - Stop specific service or all services"
+    echo "  update <service|all> - Update service (stop, pull, build, start)"
+    echo "  enable <service>     - Enable and configure a new service"
+    echo "  disable <service>    - Disable a service (stops it and optionally removes directory)"
+    echo "  help                 - Show this help"
+    echo ""
+    echo "Options:"
+    echo "  --no-cache           - Ignore cached selections and prompt for everything"
+    echo ""
+    echo "Examples:"
+    echo "  $0 start all         # Start all configured services"
+    echo "  $0 stop contactdb    # Stop contactdb service"
+    echo "  $0 update babelfish  # Update babelfish service"
+    echo "  $0 enable crm-reply  # Enable CRM Reply service"
+    echo "  $0 disable babelfish # Disable Babelfish service"
+    echo ""
+}
+
+main() {
+    local command="${1:-install}"
+    local service_arg="${2:-}"
+
+    # Parse flags
+    for arg in "$@"; do
+        case "$arg" in
+            --no-cache)
+                IGNORE_CACHE=true
+                ;;
+        esac
+    done
+
+    case "$command" in
+        install)
+            install
+            ;;
+        status)
+            show_running_status
+            ;;
+        start)
+            cmd_start "$service_arg"
+            ;;
+        stop)
+            cmd_stop "$service_arg"
+            ;;
+        update)
+            cmd_update "$service_arg"
+            ;;
+        enable)
+            cmd_enable "$service_arg"
+            ;;
+        disable)
+            cmd_disable "$service_arg"
+            ;;
+        help|--help|-h)
+            show_usage
+            ;;
+        --no-cache)
+            # Already handled above, treat as install
+            install
+            ;;
+        *)
+            log_error "Unknown command: $command"
+            show_usage
+            exit 1
+            ;;
+    esac
+}
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+main "$@"
