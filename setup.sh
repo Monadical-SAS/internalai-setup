@@ -638,6 +638,531 @@ setup_enrichment_apis() {
 }
 
 # ============================================================================
+# Caddy Reverse Proxy Configuration
+# ============================================================================
+
+setup_caddy() {
+    log_header "Caddy Reverse Proxy Setup"
+
+    # Check if Caddy is already configured and running
+    local caddy_configured=$(load_from_cache "CADDY_CONFIGURED")
+    if [ "$caddy_configured" = "true" ] && [ "$IGNORE_CACHE" != "true" ]; then
+        log_info "Caddy already configured"
+        return
+    fi
+
+    # Ask if user wants to enable Caddy
+    prompt ENABLE_CADDY "Enable Caddy reverse proxy?" "yes"
+    if [ "$ENABLE_CADDY" != "yes" ] && [ "$ENABLE_CADDY" != "y" ]; then
+        log_info "Skipping Caddy setup"
+        return
+    fi
+
+    # Generate or retrieve password
+    local caddy_password=$(load_from_cache "CADDY_PASSWORD")
+    local show_password=false
+
+    if [ -z "$caddy_password" ]; then
+        # Generate new password
+        caddy_password=$(openssl rand -base64 24)
+        save_to_cache "CADDY_PASSWORD" "$caddy_password"
+        show_password=true
+    fi
+
+    # Generate password hash using Docker (since we may not have caddy installed yet)
+    log_info "Generating password hash..."
+    local password_hash=$(docker run --rm caddy:2-alpine caddy hash-password --plaintext "$caddy_password" 2>/dev/null)
+
+    if [ -z "$password_hash" ]; then
+        log_error "Failed to generate password hash"
+        return 1
+    fi
+
+    save_to_cache "CADDY_PASSWORD_HASH" "$password_hash"
+
+    # Show password (only once, first time)
+    if [ "$show_password" = true ]; then
+        echo ""
+        log_warning "====================================================================="
+        log_warning "  CADDY BASIC AUTH PASSWORD - SAVE THIS NOW!"
+        log_warning "====================================================================="
+        log_warning ""
+        log_warning "  Username: admin"
+        log_warning "  Password: $caddy_password"
+        log_warning ""
+        log_warning "  This password will NOT be shown again!"
+        log_warning "  Use '$0 caddy new-password' to create a new one"
+        log_warning "====================================================================="
+        echo ""
+        read -p "Press Enter after you have saved the password..."
+    fi
+
+    # Ask for domain
+    local cached_domain=$(load_from_cache "CADDY_DOMAIN")
+    if [ -n "$cached_domain" ]; then
+        log_info "Using cached domain: $cached_domain"
+        CADDY_DOMAIN="$cached_domain"
+    else
+        echo ""
+        log_info "Enter the full URL or domain where services will be accessed:"
+        log_info ""
+        log_info "Examples:"
+        log_info "  • For local access:        http://localhost:8080"
+        log_info "  • For HTTPS domain:        example.com (auto https)"
+        log_info "  • For explicit HTTPS:      https://mydomain.example.com (auto https)"
+        log_info "  • For explicit HTTP:       http://example.com:8080"
+        log_info ""
+        log_info "Note: Domains without http:// or https:// will use HTTPS by default"
+        echo ""
+
+        prompt CADDY_DOMAIN "Full URL or domain (leave empty for http://localhost)" ""
+
+        if [ -n "$CADDY_DOMAIN" ]; then
+            # Extract domain for DNS verification (remove protocol and port)
+            local domain_for_dns=$(echo "$CADDY_DOMAIN" | sed -E 's#^https?://##' | sed 's/:.*//')
+
+            # Only verify DNS if it's not localhost
+            if [[ ! "$domain_for_dns" =~ localhost ]]; then
+                verify_domain_dns "$domain_for_dns"
+            fi
+        fi
+
+        save_to_cache "CADDY_DOMAIN" "$CADDY_DOMAIN"
+    fi
+
+    # Create Caddy directory
+    mkdir -p "$PLATFORM_ROOT/caddy"
+
+    # Generate Caddyfile
+    generate_caddyfile "$CADDY_DOMAIN" "$password_hash"
+
+    # Generate docker-compose for Caddy
+    generate_caddy_compose
+
+    # Mark as configured
+    save_to_cache "CADDY_CONFIGURED" "true"
+
+    # Derive and save public base URL
+    derive_public_base_url "$CADDY_DOMAIN"
+
+    log_success "Caddy configured successfully!"
+}
+
+derive_public_base_url() {
+    local domain=$1
+    local public_base_url
+
+    if [ -z "$domain" ]; then
+        # No domain, use localhost
+        public_base_url="http://localhost"
+    elif [[ "$domain" =~ ^https?:// ]]; then
+        # Already has protocol (http:// or https://), use as-is
+        public_base_url="$domain"
+    else
+        # No protocol specified, default to HTTPS
+        public_base_url="https://${domain}"
+    fi
+
+    save_to_cache "PUBLIC_BASE_URL" "$public_base_url"
+    log_info "Public base URL: $public_base_url"
+}
+
+verify_domain_dns() {
+    local domain=$1
+
+    log_info "Verifying DNS for $domain..."
+
+    # Get server's public IP
+    local server_ip=$(curl -s https://api.ipify.org 2>/dev/null || curl -s https://icanhazip.com 2>/dev/null)
+
+    if [ -z "$server_ip" ]; then
+        log_warning "Could not determine server's public IP"
+        prompt IGNORE_DNS "Continue without DNS verification?" "yes"
+        if [ "$IGNORE_DNS" != "yes" ] && [ "$IGNORE_DNS" != "y" ]; then
+            return 1
+        fi
+        return 0
+    fi
+
+    log_info "Server IP: $server_ip"
+
+    # Resolve domain
+    local domain_ip=$(dig +short "$domain" @8.8.8.8 | tail -n1)
+
+    if [ -z "$domain_ip" ]; then
+        log_warning "Could not resolve domain: $domain"
+        prompt IGNORE_DNS "Continue anyway?" "yes"
+        if [ "$IGNORE_DNS" != "yes" ] && [ "$IGNORE_DNS" != "y" ]; then
+            return 1
+        fi
+        return 0
+    fi
+
+    log_info "Domain resolves to: $domain_ip"
+
+    if [ "$domain_ip" != "$server_ip" ]; then
+        log_warning "DNS mismatch!"
+        log_warning "  Domain $domain resolves to: $domain_ip"
+        log_warning "  Server IP is: $server_ip"
+        log_warning ""
+        log_warning "Caddy will not be able to obtain Let's Encrypt certificates automatically."
+        log_warning "You may need to update your DNS records or use manual certificates."
+        echo ""
+        prompt IGNORE_DNS_MISMATCH "Continue with this domain anyway?" "yes"
+        if [ "$IGNORE_DNS_MISMATCH" != "yes" ] && [ "$IGNORE_DNS_MISMATCH" != "y" ]; then
+            return 1
+        fi
+    else
+        log_success "DNS verification passed!"
+    fi
+
+    return 0
+}
+
+generate_caddyfile() {
+    local domain=$1
+    local password_hash=$2
+
+    log_info "Generating Caddyfile..."
+
+    # Extract domain without protocol for Caddy address
+    local caddy_address
+    local tls_config=""
+
+    if [ -z "$domain" ]; then
+        # No domain provided, use port 80
+        caddy_address=":80"
+    elif [[ "$domain" =~ ^http:// ]]; then
+        # Explicit HTTP, strip protocol
+        caddy_address="${domain#http://}"
+    elif [[ "$domain" =~ ^https:// ]]; then
+        # Explicit HTTPS, strip protocol and enable auto TLS
+        caddy_address="${domain#https://}"
+        tls_config="    # Automatic HTTPS via Let's Encrypt"
+    else
+        # No protocol, assume HTTPS
+        caddy_address="$domain"
+        tls_config="    # Automatic HTTPS via Let's Encrypt"
+    fi
+
+    cat > "$PLATFORM_ROOT/caddy/Caddyfile" <<EOF
+# Caddy reverse proxy configuration for Monadical Platform
+# Generated on $(date)
+
+$caddy_address {
+$tls_config
+
+    # Basic auth for all routes
+    # Regenerate with: $0 caddy new-password
+    basicauth {
+        admin $password_hash
+    }
+
+    # Root path
+    respond / "Monadical Platform - Available services: /contactdb, /contactdb-api, /dataindex, /babelfish, /babelfish-api, /meeting-prep, /meeting-prep-api" 200
+
+    # ContactDB Frontend
+    handle /contactdb/* {
+        reverse_proxy host.docker.internal:42173 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # ContactDB Backend API
+    handle_path /contactdb-api/* {
+        reverse_proxy host.docker.internal:42800 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # DataIndex API
+    handle_path /dataindex/* {
+        reverse_proxy host.docker.internal:42180 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Babelfish Matrix Synapse (with WebSocket support)
+    handle_path /babelfish/* {
+        reverse_proxy host.docker.internal:8880 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+            # WebSocket support
+            header_up Connection {http.request.header.Connection}
+            header_up Upgrade {http.request.header.Upgrade}
+        }
+    }
+
+    # Babelfish API
+    handle_path /babelfish-api/* {
+        reverse_proxy host.docker.internal:8000 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # CRM Reply API
+    handle_path /crm-reply/* {
+        reverse_proxy host.docker.internal:3001 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Meeting Prep Frontend
+    handle_path /meeting-prep/* {
+        reverse_proxy host.docker.internal:8081 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Meeting Prep Backend API
+    handle_path /meeting-prep-api/* {
+        reverse_proxy host.docker.internal:8001 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Logging
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+}
+EOF
+
+    log_success "Caddyfile generated at $PLATFORM_ROOT/caddy/Caddyfile"
+}
+
+generate_caddy_compose() {
+    log_info "Generating Caddy docker-compose..."
+
+    local caddy_domain=$(load_from_cache "CADDY_DOMAIN")
+
+    # Determine which ports to bind based on the domain/URL
+    local bind_80=false
+    local bind_443=false
+    local custom_port=""
+
+    if [ -z "$caddy_domain" ]; then
+        # No domain - localhost only, bind port 80
+        bind_80=true
+    elif [[ "$caddy_domain" =~ ^https:// ]]; then
+        # Explicit HTTPS - bind both 80 (for redirect) and 443
+        bind_80=true
+        bind_443=true
+    elif [[ "$caddy_domain" =~ ^http://([^:]+):([0-9]+)$ ]]; then
+        # HTTP with custom port - bind only that port
+        custom_port="${BASH_REMATCH[2]}"
+    elif [[ "$caddy_domain" =~ ^http:// ]]; then
+        # HTTP without port - bind only port 80
+        bind_80=true
+    else
+        # No protocol specified - assume HTTPS, bind both 80 and 443
+        bind_80=true
+        bind_443=true
+    fi
+
+    # Generate docker-compose with conditional ports
+    cat > "$PLATFORM_ROOT/caddy/docker-compose.yml" <<'EOF'
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: monadical-caddy
+    restart: unless-stopped
+    ports:
+EOF
+
+    # Add ports based on what we determined
+    if [ -n "$custom_port" ]; then
+        echo "      - ${custom_port}:${custom_port}" >> "$PLATFORM_ROOT/caddy/docker-compose.yml"
+    else
+        if [ "$bind_80" = true ]; then
+            echo "      - 80:80" >> "$PLATFORM_ROOT/caddy/docker-compose.yml"
+        fi
+        if [ "$bind_443" = true ]; then
+            echo "      - 443:443" >> "$PLATFORM_ROOT/caddy/docker-compose.yml"
+        fi
+    fi
+
+    # Continue with rest of the compose file
+    cat >> "$PLATFORM_ROOT/caddy/docker-compose.yml" <<'EOF'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - monadical-platform
+    # Enable access to host services via host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - CADDY_ADMIN=0.0.0.0:2019
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+    name: monadical_caddy_data
+  caddy_config:
+    name: monadical_caddy_config
+
+networks:
+  monadical-platform:
+    external: true
+    name: monadical-platform
+EOF
+
+    log_success "Caddy docker-compose generated at $PLATFORM_ROOT/caddy/docker-compose.yml"
+}
+
+start_caddy() {
+    log_header "Starting Caddy"
+
+    cd "$PLATFORM_ROOT/caddy"
+
+    if [ ! -f "docker-compose.yml" ]; then
+        log_error "Caddy not configured. Run install first."
+        return 1
+    fi
+
+    docker_compose up -d
+
+    log_success "Caddy started"
+
+    # Show access info
+    local domain=$(load_from_cache "CADDY_DOMAIN")
+    local url="http://${domain:-localhost}"
+
+    echo ""
+    log_info "Caddy is now running!"
+    log_info "Access your services at: $url"
+    log_info "Username: admin"
+    log_info "Password: (saved in cache)"
+    echo ""
+}
+
+stop_caddy() {
+    log_header "Stopping Caddy"
+
+    cd "$PLATFORM_ROOT/caddy"
+
+    if [ ! -f "docker-compose.yml" ]; then
+        log_warning "Caddy docker-compose not found"
+        return 0
+    fi
+
+    docker_compose down
+
+    log_success "Caddy stopped"
+}
+
+cmd_regenerate_password() {
+    log_header "Regenerating Caddy Password"
+
+    init_cache
+
+    # Generate new password
+    local new_password=$(openssl rand -base64 24)
+
+    # Generate hash
+    log_info "Generating password hash..."
+    local password_hash=$(docker run --rm caddy:2-alpine caddy hash-password --plaintext "$new_password" 2>/dev/null)
+
+    if [ -z "$password_hash" ]; then
+        log_error "Failed to generate password hash"
+        return 1
+    fi
+
+    # Save to cache
+    save_to_cache "CADDY_PASSWORD" "$new_password"
+    save_to_cache "CADDY_PASSWORD_HASH" "$password_hash"
+
+    # Regenerate Caddyfile
+    local domain=$(load_from_cache "CADDY_DOMAIN")
+    generate_caddyfile "$domain" "$password_hash"
+
+    # Show new password
+    echo ""
+    log_warning "====================================================================="
+    log_warning "  NEW CADDY PASSWORD - SAVE THIS NOW!"
+    log_warning "====================================================================="
+    log_warning ""
+    log_warning "  Username: admin"
+    log_warning "  Password: $new_password"
+    log_warning ""
+    log_warning "  This password will NOT be shown again!"
+    log_warning "====================================================================="
+    echo ""
+
+    # Ask to restart Caddy
+    prompt RESTART_CADDY "Restart Caddy to apply new password?" "yes"
+    if [ "$RESTART_CADDY" = "yes" ] || [ "$RESTART_CADDY" = "y" ]; then
+        stop_caddy
+        start_caddy
+    else
+        log_info "Please restart Caddy manually: $0 caddy restart"
+    fi
+
+    log_success "Password regenerated successfully!"
+}
+
+cmd_caddy() {
+    local action=$1
+
+    case "$action" in
+        start)
+            start_caddy
+            ;;
+        stop)
+            stop_caddy
+            ;;
+        restart)
+            stop_caddy
+            start_caddy
+            ;;
+        status)
+            cd "$PLATFORM_ROOT/caddy" && docker_compose ps
+            ;;
+        logs)
+            cd "$PLATFORM_ROOT/caddy" && docker_compose logs -f
+            ;;
+        new-password)
+            cmd_regenerate_password
+            ;;
+        *)
+            log_error "Usage: $0 caddy {start|stop|restart|status|logs|new-password}"
+            exit 1
+            ;;
+    esac
+}
+
+# ============================================================================
 # Service Configuration
 # ============================================================================
 
@@ -652,13 +1177,33 @@ configure_contactdb() {
     local db_port="5432"
     local db_test_host="postgres_test"
 
-    # Generate backend/.env for application settings (matches docker-compose.yml)
-    mkdir -p "$PLATFORM_ROOT/contactdb/backend"
-    cat > "$PLATFORM_ROOT/contactdb/backend/.env" <<EOF
+    # Prompt for user email
+    prompt_or_cache "SELF_EMAIL" "Your email address (for identifying you in ContactDB)" "" false "$PLATFORM_ROOT/contactdb/.env"
+
+    # Derive API_PUBLIC_URL from public base URL
+    local public_base_url=$(load_from_cache "PUBLIC_BASE_URL")
+    local api_public_url
+    if [ -z "$public_base_url" ] || [ "$public_base_url" = "http://localhost" ]; then
+        api_public_url="http://localhost:42800"
+    else
+        api_public_url="${public_base_url}/contactdb-api/"
+    fi
+    log_info "Using ContactDB API Public URL: $api_public_url"
+
+    # Generate .env at root directory for application settings (matches docker-compose.yml)
+    mkdir -p "$PLATFORM_ROOT/contactdb"
+    cat > "$PLATFORM_ROOT/contactdb/.env" <<EOF
 # ContactDB Application Configuration
 # Database connection (matches docker-compose.yml hardcoded values)
 DATABASE_URL=postgresql://${db_user}:${db_password}@${db_host}:${db_port}/${db_name}
 DATABASE_URL_TEST=postgresql://${db_user}:${db_password}@${db_test_host}:${db_port}/${db_name}_test
+
+# User Configuration
+SELF_EMAIL=$SELF_EMAIL
+
+# API Configuration
+API_PUBLIC_URL=$api_public_url
+BASE_PATH=/contactdb/
 
 # Optional: Override defaults
 # APP_NAME=ContactDB
@@ -670,16 +1215,16 @@ EOF
 
     # Add Apollo API key if provided
     if [ -n "$APOLLO_API_KEY" ]; then
-        echo "APOLLO_API_KEY=$APOLLO_API_KEY" >> "$PLATFORM_ROOT/contactdb/backend/.env"
+        echo "APOLLO_API_KEY=$APOLLO_API_KEY" >> "$PLATFORM_ROOT/contactdb/.env"
     else
-        echo "# APOLLO_API_KEY=" >> "$PLATFORM_ROOT/contactdb/backend/.env"
+        echo "# APOLLO_API_KEY=" >> "$PLATFORM_ROOT/contactdb/.env"
     fi
 
     # Add Hunter API key if provided
     if [ -n "$HUNTER_API_KEY" ]; then
-        echo "HUNTER_API_KEY=$HUNTER_API_KEY" >> "$PLATFORM_ROOT/contactdb/backend/.env"
+        echo "HUNTER_API_KEY=$HUNTER_API_KEY" >> "$PLATFORM_ROOT/contactdb/.env"
     else
-        echo "# HUNTER_API_KEY=" >> "$PLATFORM_ROOT/contactdb/backend/.env"
+        echo "# HUNTER_API_KEY=" >> "$PLATFORM_ROOT/contactdb/.env"
     fi
 
     log_success "ContactDB configured"
@@ -715,13 +1260,17 @@ configure_dataindex() {
 
     # Required variables - check existing .env file if cache is empty
     prompt_or_cache "DATAINDEX_POSTGRES_PASSWORD" "PostgreSQL password for DataIndex" "auto" true "$PLATFORM_ROOT/dataindex/.env"
-    prompt_or_cache "CONTACTDB_URL_FRONTEND" "ContactDB Frontend URL" "http://localhost:42173" false "$PLATFORM_ROOT/dataindex/.env"
+
+    # Derive ContactDB frontend URL from public base URL
+    local public_base_url=$(load_from_cache "PUBLIC_BASE_URL")
+    local contactdb_url_frontend="${public_base_url:-http://localhost}/contactdb"
+    log_info "Using ContactDB Frontend URL: $contactdb_url_frontend"
 
     # Generate base .env
     cat > "$PLATFORM_ROOT/dataindex/.env" <<EOF
 # DataIndex Configuration
 CONTACTDB_URL=http://host.docker.internal:42800
-CONTACTDB_URL_FRONTEND=$CONTACTDB_URL_FRONTEND
+CONTACTDB_URL_FRONTEND=$contactdb_url_frontend
 REDIS_URL=redis://localhost:42170
 DATABASE_URL=postgresql://dataindex:$DATAINDEX_POSTGRES_PASSWORD@localhost:42434/dataindex
 
@@ -970,17 +1519,20 @@ configure_meeting_prep() {
 
     # Generate passwords and secrets - check existing .env file if cache is empty
     prompt_or_cache "MEETING_POSTGRES_PASSWORD" "PostgreSQL password for Meeting Prep" "postgres" true "$PLATFORM_ROOT/meeting-prep/.env"
-    
-    # Prompt for production URLs (public URLs only)
-    prompt_or_cache "MEETING_FRONTEND_URL" "Meeting Prep Frontend URL" "http://localhost:8081" false "$PLATFORM_ROOT/meeting-prep/.env"
-    prompt_or_cache "MEETING_BACKEND_URL" "Meeting Prep Backend URL" "http://localhost:8001" false "$PLATFORM_ROOT/meeting-prep/.env"
-    
-    # Prompt for DataIndex public URL (for browser-clickable links)
-    prompt_or_cache "DATAINDEX_PUBLIC_URL" "DataIndex public URL (for browser links)" "http://localhost:42180" false "$PLATFORM_ROOT/meeting-prep/.env"
-    
+
+    # Derive URLs from public base URL
+    local public_base_url=$(load_from_cache "PUBLIC_BASE_URL")
+    local MEETING_FRONTEND_URL="${public_base_url:-http://localhost}/meeting-prep"
+    local MEETING_BACKEND_URL="${public_base_url:-http://localhost}/meeting-prep-api"
+    local DATAINDEX_PUBLIC_URL="${public_base_url:-http://localhost}/dataindex"
+
+    log_info "Using Meeting Prep Frontend URL: $MEETING_FRONTEND_URL"
+    log_info "Using Meeting Prep Backend URL: $MEETING_BACKEND_URL"
+    log_info "Using DataIndex Public URL: $DATAINDEX_PUBLIC_URL"
+
     # Construct CORS origins from frontend URL
     local CORS_ORIGINS="${MEETING_FRONTEND_URL},http://localhost:5173,http://localhost:5174"
-    
+
     # Prompt for LiteLLM configuration
     prompt_or_cache "LITELLM_API_KEY" "LiteLLM API key" "" true "$PLATFORM_ROOT/meeting-prep/.env"
     prompt_or_cache "LITELLM_BASE_URL" "LiteLLM base URL" "https://litellm.app.monadical.io/v1/" false "$PLATFORM_ROOT/meeting-prep/.env"
@@ -1099,6 +1651,11 @@ start_services() {
 
     SERVICES_STARTED=true
 
+    # Start Caddy first if configured
+    if [ -f "$PLATFORM_ROOT/caddy/docker-compose.yml" ]; then
+        start_caddy
+    fi
+
     # Use initial_service_setup for first-time install (runs make setup where needed)
     # Start in dependency order: contactdb first, then others
     for service_id in "${SELECTED_SERVICES[@]}"; do
@@ -1116,6 +1673,13 @@ start_services() {
 
 start_service() {
     local service_id=$1
+
+    # Handle Caddy specially
+    if [ "$service_id" = "caddy" ]; then
+        start_caddy
+        return $?
+    fi
+
     local service_path="$PLATFORM_ROOT/$service_id"
 
     # Check if service directory exists
@@ -1166,7 +1730,7 @@ initial_service_setup() {
             return 1
         fi
         log_success "Babelfish setup completed"
-        
+
         # Babelfish's make setup doesn't start services, so start them
         log_info "Starting babelfish services..."
         docker_compose up -d 2>&1 | grep -v "password" || {
@@ -1198,6 +1762,13 @@ initial_service_setup() {
 
 stop_service() {
     local service_id=$1
+
+    # Handle Caddy specially
+    if [ "$service_id" = "caddy" ]; then
+        stop_caddy
+        return $?
+    fi
+
     local service_path="$PLATFORM_ROOT/$service_id"
 
     # Check if service directory exists
@@ -1226,6 +1797,33 @@ stop_service() {
 
 update_service() {
     local service_id=$1
+
+    # Caddy doesn't need git updates, but regenerate config files
+    if [ "$service_id" = "caddy" ]; then
+        log_info "Updating Caddy configuration..."
+
+        # Load cached credentials
+        init_cache
+        local caddy_domain=$(load_from_cache "CADDY_DOMAIN")
+        local password_hash=$(load_from_cache "CADDY_PASSWORD_HASH")
+
+        if [ -z "$password_hash" ]; then
+            log_error "No Caddy password found in cache. Cannot regenerate configuration."
+            return 1
+        fi
+
+        # Regenerate configuration files
+        generate_caddyfile "$caddy_domain" "$password_hash"
+        generate_caddy_compose
+
+        # Restart Caddy to apply changes
+        stop_caddy
+        start_caddy
+
+        log_success "Caddy updated with regenerated configuration"
+        return $?
+    fi
+
     local service_path="$PLATFORM_ROOT/$service_id"
 
     # Check if service directory exists
@@ -1271,6 +1869,12 @@ update_service() {
 get_configured_services() {
     # Get list of configured services (directories that exist in platform root)
     local configured=()
+
+    # Add Caddy if configured
+    if [ -f "$PLATFORM_ROOT/caddy/docker-compose.yml" ]; then
+        configured+=("caddy")
+    fi
+
     for service_def in "${AVAILABLE_SERVICES[@]}"; do
         IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
         if [ -d "$PLATFORM_ROOT/$id" ]; then
@@ -1297,7 +1901,14 @@ cmd_start() {
         log_header "Starting All Services"
         local services=($(get_configured_services))
 
-        # Start contactdb first if it exists
+        # Start caddy first if it exists
+        for svc in "${services[@]}"; do
+            if [ "$svc" = "caddy" ]; then
+                start_service "$svc"
+            fi
+        done
+
+        # Start contactdb second if it exists
         for svc in "${services[@]}"; do
             if [ "$svc" = "contactdb" ]; then
                 start_service "$svc"
@@ -1306,7 +1917,7 @@ cmd_start() {
 
         # Start others
         for svc in "${services[@]}"; do
-            if [ "$svc" != "contactdb" ]; then
+            if [ "$svc" != "contactdb" ] && [ "$svc" != "caddy" ]; then
                 start_service "$svc"
             fi
         done
@@ -1597,6 +2208,22 @@ show_status() {
 show_running_status() {
     log_header "Platform Status - Running Services"
 
+    # Check Caddy status first
+    if [ -f "$PLATFORM_ROOT/caddy/docker-compose.yml" ]; then
+        local caddy_running=$(docker ps --filter "name=monadical-caddy" --format "{{.Names}}" 2>/dev/null | wc -l | xargs)
+        local caddy_domain=$(load_from_cache "CADDY_DOMAIN")
+        local caddy_url="${caddy_domain:-http://localhost}"
+
+        if [ "$caddy_running" -gt 0 ]; then
+            echo -e "  ${GREEN}✓${NC} Caddy Reverse Proxy"
+            echo -e "    Containers: ${GREEN}1${NC}/1 running"
+            echo -e "    URL: ${BLUE}${caddy_url}${NC}"
+        else
+            echo -e "  ${YELLOW}⚠${NC} Caddy Reverse Proxy (stopped)"
+            echo -e "    Containers: ${YELLOW}0${NC}/1 running"
+        fi
+    fi
+
     # Services to display URLs for
     local url_services=("contactdb" "babelfish" "crm-reply" "meeting-prep")
 
@@ -1668,6 +2295,7 @@ install() {
     check_dependencies
     init_cache
     setup_github_auth
+    setup_caddy
     setup_enrichment_apis
     select_services
     clone_services
@@ -1702,6 +2330,7 @@ show_usage() {
     echo "  update <service|all> - Update service (stop, pull, build, start)"
     echo "  enable <service>     - Enable and configure a new service"
     echo "  disable <service>    - Disable a service (stops it and optionally removes directory)"
+    echo "  caddy <action>       - Manage Caddy reverse proxy (start|stop|restart|status|logs|new-password)"
     echo "  help                 - Show this help"
     echo ""
     echo "Options:"
@@ -1713,6 +2342,7 @@ show_usage() {
     echo "  $0 update babelfish  # Update babelfish service"
     echo "  $0 enable crm-reply  # Enable CRM Reply service"
     echo "  $0 disable babelfish # Disable Babelfish service"
+    echo "  $0 caddy new-password # Generate new Caddy password"
     echo ""
 }
 
@@ -1750,6 +2380,9 @@ main() {
             ;;
         disable)
             cmd_disable "$service_arg"
+            ;;
+        caddy)
+            cmd_caddy "$service_arg"
             ;;
         help|--help|-h)
             show_usage
