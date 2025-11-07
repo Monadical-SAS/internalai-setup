@@ -39,6 +39,7 @@ AVAILABLE_SERVICES=(
     "babelfish|https://github.com/Monadical-SAS/babelfish.git|authless-ux|8880|Universal communications bridge (Matrix homeserver)|false"
     # "crm-reply|https://github.com/Monadical-SAS/crm-reply.git|main|3001|AI-powered CRM reply assistant|false"
     "meeting-prep|https://github.com/Monadical-SAS/meeting-prep.git|dataindex-contactdb-integration|42380|Meeting preparation assistant|false"
+    "dailydigest|https://github.com/Monadical-SAS/dailydigest.git|main|42190|Stale relationship tracker for ContactDB and DataIndex|false"
 )
 
 # DataIndex ingestors
@@ -859,7 +860,7 @@ $tls_config
     }
 
     # Root path
-    respond / "Monadical Platform - Available services: /contactdb, /contactdb-api, /dataindex, /babelfish, /babelfish-api, /meeting-prep, /meeting-prep-api" 200
+    respond / "Monadical Platform - Available services: /contactdb, /contactdb-api, /dataindex, /babelfish, /babelfish-api, /meeting-prep, /meeting-prep-api, /dailydigest" 200
 
     # ContactDB Frontend
     handle /contactdb/* {
@@ -937,6 +938,16 @@ $tls_config
     # Meeting Prep Backend API
     handle_path /meeting-prep-api/* {
         reverse_proxy host.docker.internal:42381 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # DailyDigest (Frontend and Backend merged)
+    handle /dailydigest/* {
+        reverse_proxy host.docker.internal:42190 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
             header_up X-Forwarded-For {http.request.remote.host}
@@ -1560,6 +1571,43 @@ EOF
     log_success "Meeting Prep configured"
 }
 
+configure_dailydigest() {
+    log_header "Configuring DailyDigest"
+
+    # Derive URLs from public base URL
+    local public_base_url=$(load_from_cache "PUBLIC_BASE_URL")
+    local CONTACTDB_URL="${public_base_url:-http://localhost}/contactdb-api"
+    local CONTACTDB_FRONTEND_URL="${public_base_url:-http://localhost}/contactdb"
+    local DATAINDEX_URL="${public_base_url:-http://localhost}/dataindex"
+
+    log_info "Using ContactDB Backend URL: $CONTACTDB_URL"
+    log_info "Using ContactDB Frontend URL: $CONTACTDB_FRONTEND_URL"
+    log_info "Using DataIndex URL: $DATAINDEX_URL"
+
+    # Prompt for LiteLLM configuration
+    prompt_or_cache "LITELLM_API_KEY" "LiteLLM API key" "" true "$PLATFORM_ROOT/dailydigest/.env"
+    prompt_or_cache "LITELLM_BASE_URL" "LiteLLM base URL" "https://litellm-notrack.app.monadical.io" false "$PLATFORM_ROOT/dailydigest/.env"
+    prompt_or_cache "DEFAULT_LLM_MODEL" "Default LLM model" "GLM-4.5-Air-FP8-dev" false "$PLATFORM_ROOT/dailydigest/.env"
+
+    # Timezone for cron scheduling
+    prompt_or_cache "DAILYDIGEST_TZ" "Timezone for cron scheduling" "America/Montreal" false "$PLATFORM_ROOT/dailydigest/.env"
+
+    # Generate .env
+    cat > "$PLATFORM_ROOT/dailydigest/.env" <<EOF
+TZ=${DAILYDIGEST_TZ}
+DAILYDIGEST_BASE_PATH=/dailydigest/
+DAILYDIGEST_LLM_API_URL=${LITELLM_BASE_URL}
+DAILYDIGEST_LLM_API_KEY=${LITELLM_API_KEY}
+DAILYDIGEST_LLM_MODEL=${DEFAULT_LLM_MODEL}
+DAILYDIGEST_CONTACTDB_URL=http://host.docker.internal:42800
+DAILYDIGEST_DATAINDEX_URL=http://host.docker.internal:42180
+DAILYDIGEST_CONTACTDB_FRONTEND_URL=${CONTACTDB_FRONTEND_URL}
+DAILYDIGEST_DATAINDEX_FRONTEND_URL=${DATAINDEX_URL}
+EOF
+
+    log_success "DailyDigest configured"
+}
+
 # Generic function to configure a service by ID
 configure_service() {
     local service_id=$1
@@ -1579,6 +1627,9 @@ configure_service() {
             ;;
         meeting-prep)
             configure_meeting_prep
+            ;;
+        dailydigest)
+            configure_dailydigest
             ;;
         *)
             log_warning "No configuration function for $service_id"
