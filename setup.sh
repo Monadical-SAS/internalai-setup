@@ -652,12 +652,7 @@ setup_caddy() {
         return
     fi
 
-    # Ask if user wants to enable Caddy
-    prompt ENABLE_CADDY "Enable Caddy reverse proxy?" "yes"
-    if [ "$ENABLE_CADDY" != "yes" ] && [ "$ENABLE_CADDY" != "y" ]; then
-        log_info "Skipping Caddy setup"
-        return
-    fi
+    log_info "Caddy reverse proxy is required for the platform"
 
     # Generate or retrieve password
     local caddy_password=$(load_from_cache "CADDY_PASSWORD")
@@ -2489,8 +2484,25 @@ show_status() {
 
     echo -e "${CYAN}Services:${NC}"
 
+    # Get public base URL from cache
+    local public_base_url=$(load_from_cache "PUBLIC_BASE_URL")
+
+    # Show Caddy status first if it's configured
+    if [ -f "$PLATFORM_ROOT/caddy/docker-compose.yml" ]; then
+        if [ "$SERVICES_STARTED" = true ]; then
+            echo -e "  ${GREEN}✓${NC} Caddy Reverse Proxy (Welcome Page)"
+            if [ -n "$public_base_url" ] && [ "$public_base_url" != "http://localhost" ]; then
+                echo -e "    ${BLUE}${public_base_url}${NC}"
+            else
+                echo -e "    ${BLUE}http://localhost${NC}"
+            fi
+        else
+            echo -e "  ${BLUE}ℹ${NC} Caddy Reverse Proxy (configured, not started)"
+        fi
+    fi
+
     # Services to display URLs for (only if running)
-    local url_services=("contactdb" "babelfish" "crm-reply" "meeting-prep")
+    local url_services=("contactdb" "babelfish" "crm-reply" "meeting-prep" "dailydigest")
 
     for service_def in "${AVAILABLE_SERVICES[@]}"; do
         IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
@@ -2519,7 +2531,12 @@ show_status() {
                 done
 
                 if [ "$show_url" = true ]; then
-                    echo -e "    ${BLUE}http://localhost:$port${NC}"
+                    # Use public base URL if available, otherwise fall back to localhost
+                    if [ -n "$public_base_url" ] && [ "$public_base_url" != "http://localhost" ]; then
+                        echo -e "    ${BLUE}${public_base_url}/${id}${NC}"
+                    else
+                        echo -e "    ${BLUE}http://localhost:$port${NC}"
+                    fi
                 fi
             else
                 # Services are configured but not started
@@ -2548,16 +2565,21 @@ show_status() {
 show_running_status() {
     log_header "Platform Status - Running Services"
 
+    # Get public base URL from cache
+    local public_base_url=$(load_from_cache "PUBLIC_BASE_URL")
+
     # Check Caddy status first
     if [ -f "$PLATFORM_ROOT/caddy/docker-compose.yml" ]; then
         local caddy_running=$(docker ps --filter "name=monadical-caddy" --format "{{.Names}}" 2>/dev/null | wc -l | xargs)
-        local caddy_domain=$(load_from_cache "CADDY_DOMAIN")
-        local caddy_url="${caddy_domain:-http://localhost}"
 
         if [ "$caddy_running" -gt 0 ]; then
-            echo -e "  ${GREEN}✓${NC} Caddy Reverse Proxy"
+            echo -e "  ${GREEN}✓${NC} Caddy Reverse Proxy (Welcome Page)"
             echo -e "    Containers: ${GREEN}1${NC}/1 running"
-            echo -e "    URL: ${BLUE}${caddy_url}${NC}"
+            if [ -n "$public_base_url" ]; then
+                echo -e "    URL: ${BLUE}${public_base_url}${NC}"
+            else
+                echo -e "    URL: ${BLUE}http://localhost${NC}"
+            fi
         else
             echo -e "  ${YELLOW}⚠${NC} Caddy Reverse Proxy (stopped)"
             echo -e "    Containers: ${YELLOW}0${NC}/1 running"
@@ -2602,7 +2624,12 @@ show_running_status() {
             done
 
             if [ "$show_url" = true ]; then
-                echo -e "    URL: ${BLUE}http://localhost:$port${NC}"
+                # Use public base URL if available, otherwise fall back to localhost
+                if [ -n "$public_base_url" ] && [ "$public_base_url" != "http://localhost" ]; then
+                    echo -e "    URL: ${BLUE}${public_base_url}/${id}${NC}"
+                else
+                    echo -e "    URL: ${BLUE}http://localhost:$port${NC}"
+                fi
             fi
         else
             # Service configured but not running
@@ -2643,6 +2670,7 @@ install() {
     setup_docker_network
     start_services
     show_status
+    cmd_update "caddy"
 
     log_success "Installation complete!"
     echo ""
