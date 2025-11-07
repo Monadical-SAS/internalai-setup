@@ -1596,6 +1596,7 @@ configure_dataindex() {
     # Derive ContactDB frontend URL from public base URL
     local public_base_url=$(load_from_cache "PUBLIC_BASE_URL")
     local contactdb_url_frontend="${public_base_url:-http://localhost}/contactdb"
+    local contactdb_url_backend="${public_base_url:-http://localhost}/contactdb-api"
     log_info "Using ContactDB Frontend URL: $contactdb_url_frontend"
 
     # Generate base .env
@@ -1603,6 +1604,7 @@ configure_dataindex() {
 # DataIndex Configuration
 CONTACTDB_URL=http://host.docker.internal:42800
 CONTACTDB_URL_FRONTEND=$contactdb_url_frontend
+CONTACTDB_URL_API_PUBLIC=$contactdb_url_backend
 REDIS_URL=redis://localhost:42170
 DATABASE_URL=postgresql://dataindex:$DATAINDEX_POSTGRES_PASSWORD@localhost:42434/dataindex
 BASE_PATH=/dataindex/
