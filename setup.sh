@@ -856,7 +856,7 @@ generate_index_html() {
                     <h3>📊 DataIndex</h3>
                     <p>$desc</p>
                     <div class=\"links\">
-                        <a href=\"/dataindex/\" class=\"btn btn-primary\">API</a>
+                        <a href=\"/dataindex/\" class=\"btn btn-primary\">Frontend and API</a>
                     </div>
                 </div>"
                     ;;
