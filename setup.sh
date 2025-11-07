@@ -820,6 +820,325 @@ verify_domain_dns() {
     return 0
 }
 
+generate_index_html() {
+    log_info "Generating HTML index..."
+
+    mkdir -p "$PLATFORM_ROOT/caddy/www"
+
+    # Determine which services are configured
+    local services_html=""
+    local has_services=false
+
+    # Check each service
+    for service_def in "${AVAILABLE_SERVICES[@]}"; do
+        IFS='|' read -r id repo branch port desc mandatory <<< "$service_def"
+
+        # Check if service directory exists (service was configured)
+        if [ -d "$PLATFORM_ROOT/$id" ]; then
+            has_services=true
+
+            # Build service card HTML based on service type
+            case "$id" in
+                contactdb)
+                    services_html+="
+                <div class=\"service-card\">
+                    <h3>📇 ContactDB</h3>
+                    <p>$desc</p>
+                    <div class=\"links\">
+                        <a href=\"/contactdb/\" class=\"btn btn-primary\">Frontend</a>
+                        <a href=\"/contactdb-api/\" class=\"btn btn-secondary\">API</a>
+                    </div>
+                </div>"
+                    ;;
+                dataindex)
+                    services_html+="
+                <div class=\"service-card\">
+                    <h3>📊 DataIndex</h3>
+                    <p>$desc</p>
+                    <div class=\"links\">
+                        <a href=\"/dataindex/\" class=\"btn btn-primary\">API</a>
+                    </div>
+                </div>"
+                    ;;
+                babelfish)
+                    services_html+="
+                <div class=\"service-card\">
+                    <h3>🐠 Babelfish</h3>
+                    <p>$desc</p>
+                    <div class=\"links\">
+                        <a href=\"/babelfish/\" class=\"btn btn-primary\">Matrix Homeserver</a>
+                        <a href=\"/babelfish-api/\" class=\"btn btn-secondary\">API</a>
+                    </div>
+                </div>"
+                    ;;
+                crm-reply)
+                    services_html+="
+                <div class=\"service-card\">
+                    <h3>💬 CRM Reply</h3>
+                    <p>$desc</p>
+                    <div class=\"links\">
+                        <a href=\"/crm-reply/\" class=\"btn btn-primary\">Open</a>
+                    </div>
+                </div>"
+                    ;;
+                meeting-prep)
+                    services_html+="
+                <div class=\"service-card\">
+                    <h3>📅 Meeting Prep</h3>
+                    <p>$desc</p>
+                    <div class=\"links\">
+                        <a href=\"/meeting-prep/\" class=\"btn btn-primary\">Frontend</a>
+                        <a href=\"/meeting-prep-api/\" class=\"btn btn-secondary\">API</a>
+                    </div>
+                </div>"
+                    ;;
+                dailydigest)
+                    services_html+="
+                <div class=\"service-card\">
+                    <h3>📧 DailyDigest</h3>
+                    <p>$desc</p>
+                    <div class=\"links\">
+                        <a href=\"/dailydigest/\" class=\"btn btn-primary\">Open</a>
+                    </div>
+                </div>"
+                    ;;
+            esac
+        fi
+    done
+
+    # If no services configured, show message
+    if [ "$has_services" = false ]; then
+        services_html="
+            <div class=\"service-card\">
+                <h3>No Services Configured</h3>
+                <p>Run the setup script to configure and start services.</p>
+            </div>"
+    fi
+
+    cat > "$PLATFORM_ROOT/caddy/www/index.html" <<'HTMLEOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monadical Platform</title>
+    <style>
+        /* Monadical Design System - Inlined for self-contained use */
+        :root {
+            /* Typography */
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.5;
+            font-weight: 400;
+
+            /* Border Radius */
+            --radius: 0.625rem;
+
+            /* Colors (RGB format) */
+            --background: 245 245 240;
+            --foreground: 37 37 37;
+            --card: 255 255 255;
+            --card-foreground: 37 37 37;
+            --primary: 45 125 94;
+            --primary-foreground: 255 255 255;
+            --secondary: 245 241 233;
+            --secondary-foreground: 80 70 60;
+            --muted: 230 230 225;
+            --muted-foreground: 115 115 115;
+            --accent: 232 150 78;
+            --accent-foreground: 37 37 37;
+            --border: 220 220 215;
+            --ring: 45 125 94;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            border-color: rgb(var(--border));
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background-color: rgb(var(--background));
+            color: rgb(var(--foreground));
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+            padding: 2rem 0;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            color: rgb(var(--foreground));
+        }
+
+        header p {
+            font-size: 1.125rem;
+            color: rgb(var(--muted-foreground));
+        }
+
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 3rem;
+        }
+
+        .service-card {
+            background: rgb(var(--card));
+            border: 1px solid rgb(var(--border));
+            border-radius: calc(var(--radius) + 4px);
+            padding: 1.5rem;
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+            transition: all 0.2s ease;
+        }
+
+        .service-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+
+        .service-card h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: rgb(var(--card-foreground));
+        }
+
+        .service-card p {
+            font-size: 0.875rem;
+            margin-bottom: 1rem;
+            color: rgb(var(--muted-foreground));
+            line-height: 1.5;
+        }
+
+        .links {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            white-space: nowrap;
+            font-size: 0.875rem;
+            font-weight: 500;
+            height: 2.25rem;
+            padding: 0 1rem;
+            border-radius: var(--radius);
+            text-decoration: none;
+            transition: all 0.2s ease;
+            border: none;
+            cursor: pointer;
+        }
+
+        .btn-primary {
+            background-color: rgb(var(--primary));
+            color: rgb(var(--primary-foreground));
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        }
+
+        .btn-primary:hover {
+            background-color: rgba(45, 125, 94, 0.9);
+        }
+
+        .btn-secondary {
+            background-color: rgb(var(--secondary));
+            color: rgb(var(--secondary-foreground));
+            border: 1px solid rgba(80, 70, 60, 0.2);
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        }
+
+        .btn-secondary:hover {
+            background-color: rgba(245, 241, 233, 0.8);
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem 0;
+            border-top: 1px solid rgb(var(--border));
+            margin-top: 3rem;
+        }
+
+        footer p {
+            font-size: 0.875rem;
+            color: rgb(var(--muted-foreground));
+            margin: 0.25rem 0;
+        }
+
+        footer a {
+            color: rgb(var(--primary));
+            text-decoration: underline;
+            text-underline-offset: 4px;
+        }
+
+        footer a:hover {
+            color: rgba(45, 125, 94, 0.9);
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+
+            header h1 {
+                font-size: 2rem;
+            }
+
+            header p {
+                font-size: 1rem;
+            }
+
+            .services-grid {
+                grid-template-columns: 1fr;
+                gap: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>InternalAI Platform</h1>
+        </header>
+
+        <div class="services-grid">
+HTMLEOF
+
+    # Insert services HTML dynamically
+    echo "$services_html" >> "$PLATFORM_ROOT/caddy/www/index.html"
+
+    # Close the HTML
+    cat >> "$PLATFORM_ROOT/caddy/www/index.html" <<'HTMLEOF'
+        </div>
+
+        <footer>
+HTMLEOF
+    echo "            <p>Generated on $(date)</p>" >> "$PLATFORM_ROOT/caddy/www/index.html"
+    cat >> "$PLATFORM_ROOT/caddy/www/index.html" <<'HTMLEOF'
+            <p><a href="https://github.com/Monadical-SAS" target="_blank">Monadical SAS</a></p>
+        </footer>
+    </div>
+</body>
+</html>
+HTMLEOF
+
+    log_success "HTML index generated at $PLATFORM_ROOT/caddy/www/index.html"
+}
+
 generate_caddyfile() {
     local domain=$1
     local password_hash=$2
@@ -846,6 +1165,9 @@ generate_caddyfile() {
         tls_config="    # Automatic HTTPS via Let's Encrypt"
     fi
 
+    # Generate HTML index file
+    generate_index_html
+
     cat > "$PLATFORM_ROOT/caddy/Caddyfile" <<EOF
 # Caddy reverse proxy configuration for Monadical Platform
 # Generated on $(date)
@@ -859,8 +1181,11 @@ $tls_config
         admin $password_hash
     }
 
-    # Root path
-    respond / "Monadical Platform - Available services: /contactdb, /contactdb-api, /dataindex, /babelfish, /babelfish-api, /meeting-prep, /meeting-prep-api, /dailydigest" 200
+    # Root path - serve HTML index
+    handle / {
+        root * /srv
+        file_server
+    }
 
     # ContactDB Frontend
     handle /contactdb/* {
@@ -1022,6 +1347,7 @@ EOF
     cat >> "$PLATFORM_ROOT/caddy/docker-compose.yml" <<'EOF'
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./www:/srv:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
