@@ -38,7 +38,7 @@ AVAILABLE_SERVICES=(
     "dataindex|https://github.com/Monadical-SAS/dataindex.git|main|42180|Data aggregation from multiple sources|true"
     "babelfish|https://github.com/Monadical-SAS/babelfish.git|authless-ux|8880|Universal communications bridge (Matrix homeserver)|false"
     # "crm-reply|https://github.com/Monadical-SAS/crm-reply.git|main|3001|AI-powered CRM reply assistant|false"
-    "meeting-prep|https://github.com/Monadical-SAS/meeting-prep.git|pangolin-deployment|8081|Meeting preparation assistant|false"
+    "meeting-prep|https://github.com/Monadical-SAS/meeting-prep.git|dataindex-contactdb-integration|42380|Meeting preparation assistant|false"
 )
 
 # DataIndex ingestors
@@ -925,8 +925,8 @@ $tls_config
     }
 
     # Meeting Prep Frontend
-    handle_path /meeting-prep/* {
-        reverse_proxy host.docker.internal:8081 {
+    handle /meeting-prep/* {
+        reverse_proxy host.docker.internal:42380 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
             header_up X-Forwarded-For {http.request.remote.host}
@@ -936,7 +936,7 @@ $tls_config
 
     # Meeting Prep Backend API
     handle_path /meeting-prep-api/* {
-        reverse_proxy host.docker.internal:8001 {
+        reverse_proxy host.docker.internal:42381 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
             header_up X-Forwarded-For {http.request.remote.host}
@@ -1529,9 +1529,6 @@ configure_meeting_prep() {
     # Ensure enrichment APIs are loaded
     setup_enrichment_apis
 
-    # Generate passwords and secrets - check existing .env file if cache is empty
-    prompt_or_cache "MEETING_POSTGRES_PASSWORD" "PostgreSQL password for Meeting Prep" "postgres" true "$PLATFORM_ROOT/meeting-prep/.env"
-
     # Derive URLs from public base URL
     local public_base_url=$(load_from_cache "PUBLIC_BASE_URL")
     local MEETING_FRONTEND_URL="${public_base_url:-http://localhost}/meeting-prep"
@@ -1542,61 +1539,22 @@ configure_meeting_prep() {
     log_info "Using Meeting Prep Backend URL: $MEETING_BACKEND_URL"
     log_info "Using DataIndex Public URL: $DATAINDEX_PUBLIC_URL"
 
-    # Construct CORS origins from frontend URL
-    local CORS_ORIGINS="${MEETING_FRONTEND_URL},http://localhost:5173,http://localhost:5174"
-
     # Prompt for LiteLLM configuration
     prompt_or_cache "LITELLM_API_KEY" "LiteLLM API key" "" true "$PLATFORM_ROOT/meeting-prep/.env"
-    prompt_or_cache "LITELLM_BASE_URL" "LiteLLM base URL" "https://litellm.app.monadical.io/v1/" false "$PLATFORM_ROOT/meeting-prep/.env"
-    prompt_or_cache "DEFAULT_LLM_MODEL" "Default LLM model" "zai-org/GLM-4.5-Air-FP8" false "$PLATFORM_ROOT/meeting-prep/.env"
+    prompt_or_cache "LITELLM_BASE_URL" "LiteLLM base URL" "https://litellm-notrack.app.monadical.io/v1/" false "$PLATFORM_ROOT/meeting-prep/.env"
+    prompt_or_cache "DEFAULT_LLM_MODEL" "Default LLM model" "GLM-4.5-Air-FP8-dev" false "$PLATFORM_ROOT/meeting-prep/.env"
+    prompt_or_cache "APOLLO_API_KEY" "Apollo API key (optional)" "" true
 
     # Generate .env
     cat > "$PLATFORM_ROOT/meeting-prep/.env" <<EOF
-# Meeting Prep Configuration
-
-# =============================================================================
-# Database Configuration
-# =============================================================================
-DATABASE_URL=postgresql+asyncpg://postgres:${MEETING_POSTGRES_PASSWORD}@meeting-prep-postgres-1:5432/meeting_prep
-
-# =============================================================================
-# Production URLs (for Pangolin deployment)
-# =============================================================================
-
-# Frontend URL (exposed via Pangolin)
-FRONTEND_URL=${MEETING_FRONTEND_URL}
-
-# Backend URL (exposed via Pangolin)
-BACKEND_URL=${MEETING_BACKEND_URL}
-
-# CORS Configuration - include your production frontend URL
-CORS_ORIGINS=${CORS_ORIGINS}
-
-# Apollo API Configuration
-APOLLO_API_URL=https://api.apollo.io/v1
-EOF
-
-    # Add Apollo API key if provided
-    if [ -n "$APOLLO_API_KEY" ]; then
-        echo "APOLLO_API_KEY=$APOLLO_API_KEY" >> "$PLATFORM_ROOT/meeting-prep/.env"
-    else
-        echo "# APOLLO_API_KEY=" >> "$PLATFORM_ROOT/meeting-prep/.env"
-    fi
-
-    # Add LiteLLM configuration
-    cat >> "$PLATFORM_ROOT/meeting-prep/.env" <<EOF
-
-# LiteLLM Configuration
+BASE_PATH=/meeting-prep/
+VITE_API_URL=${MEETING_BACKEND_URL}
+CORS_ORIGINS=${MEETING_FRONTEND_URL}
 LITELLM_API_KEY=${LITELLM_API_KEY}
 LITELLM_BASE_URL=${LITELLM_BASE_URL}
 DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL}
-
-# DataIndex Public URL - for browser-clickable links in the UI
-# Backend automatically uses http://host.docker.internal:42180 for API calls
+APOLLO_API_KEY=${APOLLO_API_KEY}
 DATAINDEX_PUBLIC_URL=${DATAINDEX_PUBLIC_URL}
-
-# Note: ContactDB backend access is automatic via host.docker.internal:42800
-# Frontend automatically uses BACKEND_URL for API calls (via docker-compose)
 EOF
 
     log_success "Meeting Prep configured"
