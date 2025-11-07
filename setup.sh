@@ -845,8 +845,7 @@ generate_index_html() {
                     <h3>📇 ContactDB</h3>
                     <p>$desc</p>
                     <div class=\"links\">
-                        <a href=\"/contactdb/\" class=\"btn btn-primary\">Frontend</a>
-                        <a href=\"/contactdb-api/\" class=\"btn btn-secondary\">API</a>
+                        <a href=\"/contactdb/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
                     </div>
                 </div>"
                     ;;
@@ -856,7 +855,7 @@ generate_index_html() {
                     <h3>📊 DataIndex</h3>
                     <p>$desc</p>
                     <div class=\"links\">
-                        <a href=\"/dataindex/\" class=\"btn btn-primary\">Frontend and API</a>
+                        <a href=\"/dataindex/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
                     </div>
                 </div>"
                     ;;
@@ -866,8 +865,7 @@ generate_index_html() {
                     <h3>🐠 Babelfish</h3>
                     <p>$desc</p>
                     <div class=\"links\">
-                        <a href=\"/babelfish/\" class=\"btn btn-primary\">Matrix Homeserver</a>
-                        <a href=\"/babelfish-api/\" class=\"btn btn-secondary\">API</a>
+                        <a href=\"/babelfish/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
                     </div>
                 </div>"
                     ;;
@@ -877,7 +875,7 @@ generate_index_html() {
                     <h3>💬 CRM Reply</h3>
                     <p>$desc</p>
                     <div class=\"links\">
-                        <a href=\"/crm-reply/\" class=\"btn btn-primary\">Open</a>
+                        <a href=\"/crm-reply/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
                     </div>
                 </div>"
                     ;;
@@ -887,8 +885,7 @@ generate_index_html() {
                     <h3>📅 Meeting Prep</h3>
                     <p>$desc</p>
                     <div class=\"links\">
-                        <a href=\"/meeting-prep/\" class=\"btn btn-primary\">Frontend</a>
-                        <a href=\"/meeting-prep-api/\" class=\"btn btn-secondary\">API</a>
+                        <a href=\"/meeting-prep/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
                     </div>
                 </div>"
                     ;;
@@ -898,7 +895,7 @@ generate_index_html() {
                     <h3>📧 DailyDigest</h3>
                     <p>$desc</p>
                     <div class=\"links\">
-                        <a href=\"/dailydigest/\" class=\"btn btn-primary\">Open</a>
+                        <a href=\"/dailydigest/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
                     </div>
                 </div>"
                     ;;
