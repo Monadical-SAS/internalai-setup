@@ -2749,7 +2749,7 @@ cmd_self_update() {
 }
 
 show_usage() {
-    echo "Monadical Platform Setup"
+    echo "Monadical InternalAI Setup"
     echo ""
     echo "Usage: $0 [command] [options]"
     echo ""
