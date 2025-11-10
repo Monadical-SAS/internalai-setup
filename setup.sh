@@ -1445,6 +1445,159 @@ cmd_caddy() {
     esac
 }
 
+cmd_cache() {
+    local action="${1:-show}"
+    local var_name="${2:-}"
+
+    # For show command, check if cache exists first
+    if [ "$action" = "show" ] || [ "$action" = "" ]; then
+        if [ ! -f "$CACHE_FILE" ]; then
+            log_warning "Cache file not found at: $CACHE_FILE"
+            log_info "The cache will be created automatically when you run the install command"
+            return
+        fi
+    fi
+
+    # Initialize cache to ensure CACHE_PASSWORD is set if needed
+    init_cache
+
+    case "$action" in
+        show|"")
+            cmd_cache_show
+            ;;
+        edit)
+            if [ -z "$var_name" ]; then
+                log_error "Usage: $0 cache edit <VAR_NAME>"
+                exit 1
+            fi
+            cmd_cache_edit "$var_name"
+            ;;
+        *)
+            log_error "Usage: $0 cache {show|edit <VAR_NAME>}"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_cache_show() {
+    log_header "Credential Cache Contents"
+
+    if [ ! -f "$CACHE_FILE" ]; then
+        log_warning "Cache file not found at: $CACHE_FILE"
+        return
+    fi
+
+    if [ ! -s "$CACHE_FILE" ]; then
+        log_warning "Cache file is empty"
+        return
+    fi
+
+    local temp_file=$(mktemp)
+
+    # Check if cache is encrypted
+    if head -n1 "$CACHE_FILE" | grep -q "^Salted__"; then
+        log_info "Cache is encrypted, decrypting..."
+        if ! openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$CACHE_PASSWORD" -in "$CACHE_FILE" > "$temp_file" 2>/dev/null; then
+            log_error "Failed to decrypt cache. Wrong password?"
+            rm -f "$temp_file"
+            exit 1
+        fi
+    else
+        cp "$CACHE_FILE" "$temp_file"
+    fi
+
+    echo ""
+    echo "Variable Name                          | Value"
+    echo "---------------------------------------+---------------------------------------"
+
+    # Read and display cache contents, masking sensitive values
+    while IFS='=' read -r key value; do
+        if [ -n "$key" ]; then
+            # Mask sensitive values (passwords, tokens, keys)
+            if echo "$key" | grep -qiE "PASSWORD|TOKEN|KEY|SECRET"; then
+                if [ -n "$value" ]; then
+                    masked_value="********"
+                else
+                    masked_value="(empty)"
+                fi
+            else
+                masked_value="$value"
+            fi
+            printf "%-38s | %s\n" "$key" "$masked_value"
+        fi
+    done < "$temp_file"
+
+    rm -f "$temp_file"
+    echo ""
+    log_info "To view or edit a specific value: $0 cache edit <VAR_NAME>"
+}
+
+cmd_cache_edit() {
+    local var_name=$1
+
+    log_header "Edit Cache Variable: $var_name"
+
+    # Load current value
+    local current_value=$(load_from_cache "$var_name")
+
+    if [ -n "$current_value" ]; then
+        # Mask sensitive values in display
+        if echo "$var_name" | grep -qiE "PASSWORD|TOKEN|KEY|SECRET"; then
+            log_info "Current value: ********"
+        else
+            log_info "Current value: $current_value"
+        fi
+    else
+        log_info "Variable not found in cache (will be created)"
+    fi
+
+    echo ""
+
+    # Determine if this should be a hidden input
+    local is_sensitive=false
+    if echo "$var_name" | grep -qiE "PASSWORD|TOKEN|KEY|SECRET"; then
+        is_sensitive=true
+    fi
+
+    # Prompt for new value
+    if [ "$is_sensitive" = true ]; then
+        prompt NEW_VALUE "Enter new value for $var_name (leave empty to delete)" "" true
+    else
+        prompt NEW_VALUE "Enter new value for $var_name (leave empty to delete)" ""
+    fi
+
+    if [ -z "$NEW_VALUE" ]; then
+        # Delete the variable from cache
+        log_info "Deleting $var_name from cache..."
+
+        local temp_file=$(mktemp)
+
+        # Decrypt if needed
+        if head -n1 "$CACHE_FILE" 2>/dev/null | grep -q "^Salted__"; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$CACHE_PASSWORD" -in "$CACHE_FILE" 2>/dev/null > "$temp_file" || true
+        else
+            cp "$CACHE_FILE" "$temp_file" 2>/dev/null || touch "$temp_file"
+        fi
+
+        # Remove the variable
+        grep -v "^$var_name=" "$temp_file" > "${temp_file}.tmp" 2>/dev/null || true
+
+        # Re-encrypt if needed
+        if [ -n "$CACHE_PASSWORD" ]; then
+            openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$CACHE_PASSWORD" -in "${temp_file}.tmp" -out "$CACHE_FILE"
+        else
+            mv "${temp_file}.tmp" "$CACHE_FILE"
+        fi
+
+        rm -f "$temp_file" "${temp_file}.tmp"
+        log_success "Variable $var_name deleted from cache"
+    else
+        # Save new value
+        save_to_cache "$var_name" "$NEW_VALUE"
+        log_success "Variable $var_name updated successfully"
+    fi
+}
+
 # ============================================================================
 # Service Configuration
 # ============================================================================
@@ -2527,7 +2680,6 @@ install() {
     setup_docker_network
     start_services
     show_status
-    cmd_update "caddy"
 
     log_success "Installation complete!"
     echo ""
@@ -2611,6 +2763,7 @@ show_usage() {
     echo "  enable <service>       - Enable and configure a new service"
     echo "  disable <service>      - Disable a service (stops it and optionally removes directory)"
     echo "  caddy <action>         - Manage Caddy reverse proxy (start|stop|restart|status|logs|new-password)"
+    echo "  cache [show|edit]      - Manage credential cache (show all or edit specific variable)"
     echo "  help                   - Show this help"
     echo ""
     echo "Options:"
@@ -2625,6 +2778,8 @@ show_usage() {
     echo "  $0 enable crm-reply    # Enable CRM Reply service"
     echo "  $0 disable babelfish   # Disable Babelfish service"
     echo "  $0 caddy new-password  # Generate new Caddy password"
+    echo "  $0 cache               # Show all cached credentials (masked)"
+    echo "  $0 cache edit AUTH_TYPE    # Edit specific cache variable"
     echo ""
 }
 
@@ -2668,6 +2823,10 @@ main() {
             ;;
         caddy)
             cmd_caddy "$service_arg"
+            ;;
+        cache)
+            shift  # Remove 'cache' from args
+            cmd_cache "$@"
             ;;
         help|--help|-h)
             show_usage
