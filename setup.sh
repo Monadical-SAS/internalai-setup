@@ -2761,7 +2761,7 @@ cmd_self_update() {
 }
 
 show_usage() {
-    echo "Monadical InternalAI CLI toolkit"
+    echo "InternalAI Platform CLI - by Monadical"
     echo ""
     echo "Usage: $0 [command] [options]"
     echo ""
