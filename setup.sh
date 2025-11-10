@@ -2002,7 +2002,7 @@ update_service() {
 
     # Caddy doesn't need git updates, but regenerate config files
     if [ "$service_id" = "caddy" ]; then
-        log_info "Updating Caddy configuration..."
+        log_info "Upgrading Caddy configuration..."
 
         # Load cached credentials
         local caddy_domain=$(load_from_cache "CADDY_DOMAIN")
@@ -2021,7 +2021,7 @@ update_service() {
         stop_caddy
         start_caddy
 
-        log_success "Caddy updated with regenerated configuration"
+        log_success "Caddy upgraded with regenerated configuration"
         return $?
     fi
 
@@ -2033,7 +2033,7 @@ update_service() {
         return 1
     fi
 
-    log_info "Updating $service_id..."
+    log_info "Upgrading $service_id..."
 
     # Stop service
     stop_service "$service_id" || return 1
@@ -2068,7 +2068,7 @@ update_service() {
     fi
 
     cd "$PLATFORM_ROOT"
-    log_success "$service_id updated"
+    log_success "$service_id upgraded"
 }
 
 # ============================================================================
@@ -2158,11 +2158,11 @@ cmd_stop() {
     fi
 }
 
-cmd_update() {
+cmd_upgrade() {
     local service_name=$1
 
     if [ -z "$service_name" ]; then
-        log_error "Usage: $0 update <service|all>"
+        log_error "Usage: $0 upgrade <service|all>"
         echo ""
         echo "Configured services:"
         for svc in $(get_configured_services); do
@@ -2174,17 +2174,17 @@ cmd_update() {
     init_cache
 
     if [ "$service_name" = "all" ]; then
-        log_header "Updating All Services"
+        log_header "Upgrading All Services"
         local services=($(get_configured_services))
 
-        # Update contactdb first if it exists
+        # Upgrade contactdb first if it exists
         for svc in "${services[@]}"; do
             if [ "$svc" = "contactdb" ]; then
                 update_service "$svc"
             fi
         done
 
-        # Update others
+        # Upgrade others
         for svc in "${services[@]}"; do
             if [ "$svc" != "contactdb" ]; then
                 update_service "$svc"
@@ -2542,32 +2542,89 @@ install() {
 # Command Handling
 # ============================================================================
 
+cmd_self_update() {
+    log_header "Self-Update InternalAI CLI"
+
+    local INSTALL_URL="https://github.com/Monadical-SAS/internalai-setup/raw/main/install.sh"  # Replace with actual URL
+    local SCRIPT_PATH="$(realpath "$0")"
+
+    log_info "Current installation: $SCRIPT_PATH"
+    log_info "Downloading latest version from $INSTALL_URL..."
+
+    # Create temporary file
+    TMP_FILE=$(mktemp)
+    trap "rm -f $TMP_FILE" EXIT
+
+    # Download the latest version
+    if ! curl -fsSL "$INSTALL_URL" -o "$TMP_FILE"; then
+        log_error "Failed to download latest version from $INSTALL_URL"
+        exit 1
+    fi
+
+    # Verify it's a valid bash script
+    if ! head -n 1 "$TMP_FILE" | grep -q "^#!/bin/bash"; then
+        log_error "Downloaded file does not appear to be a valid bash script"
+        exit 1
+    fi
+
+    log_success "Downloaded latest version"
+
+    # Check if we need sudo
+    if [ -w "$SCRIPT_PATH" ]; then
+        SUDO=""
+    else
+        if command -v sudo &> /dev/null; then
+            SUDO="sudo"
+            log_info "Requesting admin privileges to update..."
+        else
+            log_error "No write permission to $SCRIPT_PATH and sudo not available"
+            exit 1
+        fi
+    fi
+
+    # Replace the current script with the new version
+    log_info "Installing update..."
+    if [ -n "$SUDO" ]; then
+        $SUDO cp "$TMP_FILE" "$SCRIPT_PATH"
+        $SUDO chmod +x "$SCRIPT_PATH"
+    else
+        cp "$TMP_FILE" "$SCRIPT_PATH"
+        chmod +x "$SCRIPT_PATH"
+    fi
+
+    log_success "InternalAI CLI updated successfully!"
+    log_info "Run 'internalai help' to see any new features"
+}
+
 show_usage() {
     echo "Monadical Platform Setup"
     echo ""
     echo "Usage: $0 [command] [options]"
     echo ""
     echo "Commands:"
-    echo "  install              - Install platform (default)"
-    echo "  status               - Show running services and container statuses"
-    echo "  start <service|all>  - Start specific service or all services"
-    echo "  stop <service|all>   - Stop specific service or all services"
-    echo "  update <service|all> - Update service (stop, pull, build, start)"
-    echo "  enable <service>     - Enable and configure a new service"
-    echo "  disable <service>    - Disable a service (stops it and optionally removes directory)"
-    echo "  caddy <action>       - Manage Caddy reverse proxy (start|stop|restart|status|logs|new-password)"
-    echo "  help                 - Show this help"
+    echo "  install                - Install platform (default)"
+    echo "  status                 - Show running services and container statuses"
+    echo "  start <service|all>    - Start specific service or all services"
+    echo "  stop <service|all>     - Stop specific service or all services"
+    echo "  update                 - Update the internalai CLI to the latest version"
+    echo "  upgrade <service|all>  - Upgrade service (stop, pull, build, start)"
+    echo "  enable <service>       - Enable and configure a new service"
+    echo "  disable <service>      - Disable a service (stops it and optionally removes directory)"
+    echo "  caddy <action>         - Manage Caddy reverse proxy (start|stop|restart|status|logs|new-password)"
+    echo "  help                   - Show this help"
     echo ""
     echo "Options:"
     echo "  --no-cache           - Ignore cached selections and prompt for everything"
     echo ""
     echo "Examples:"
-    echo "  $0 start all         # Start all configured services"
-    echo "  $0 stop contactdb    # Stop contactdb service"
-    echo "  $0 update babelfish  # Update babelfish service"
-    echo "  $0 enable crm-reply  # Enable CRM Reply service"
-    echo "  $0 disable babelfish # Disable Babelfish service"
-    echo "  $0 caddy new-password # Generate new Caddy password"
+    echo "  $0 update              # Update internalai CLI"
+    echo "  $0 start all           # Start all configured services"
+    echo "  $0 stop contactdb      # Stop contactdb service"
+    echo "  $0 upgrade babelfish   # Upgrade babelfish service"
+    echo "  $0 upgrade all         # Upgrade all services"
+    echo "  $0 enable crm-reply    # Enable CRM Reply service"
+    echo "  $0 disable babelfish   # Disable Babelfish service"
+    echo "  $0 caddy new-password  # Generate new Caddy password"
     echo ""
 }
 
@@ -2598,7 +2655,10 @@ main() {
             cmd_stop "$service_arg"
             ;;
         update)
-            cmd_update "$service_arg"
+            cmd_self_update
+            ;;
+        upgrade)
+            cmd_upgrade "$service_arg"
             ;;
         enable)
             cmd_enable "$service_arg"
