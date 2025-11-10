@@ -40,6 +40,7 @@ AVAILABLE_SERVICES=(
     # "crm-reply|https://github.com/Monadical-SAS/crm-reply.git|main|3001|AI-powered CRM reply assistant|false"
     "meeting-prep|https://github.com/Monadical-SAS/meeting-prep.git|dataindex-contactdb-integration|42380|Meeting preparation assistant|false"
     "dailydigest|https://github.com/Monadical-SAS/dailydigest.git|main|42190|Stale relationship tracker for ContactDB and DataIndex|false"
+    "librechat|https://github.com/danny-avila/LibreChat.git|main|3080|AI chat interface with multiple model support|false"
 )
 
 # ============================================================================
@@ -621,7 +622,7 @@ setup_caddy() {
 
     # Generate password hash using Docker (since we may not have caddy installed yet)
     log_info "Generating password hash..."
-    local password_hash=$(docker run --rm caddy:2-alpine caddy hash-password --plaintext "$caddy_password" 2>/dev/null)
+    local password_hash=$(docker run --rm thekevjames/caddy-security:latest caddy hash-password --plaintext "$caddy_password" 2>/dev/null)
 
     if [ -z "$password_hash" ]; then
         log_error "Failed to generate password hash"
@@ -634,7 +635,7 @@ setup_caddy() {
     if [ "$show_password" = true ]; then
         echo ""
         log_warning "====================================================================="
-        log_warning "  CADDY BASIC AUTH PASSWORD - SAVE THIS NOW!"
+        log_warning "  INTERNALAI PORTAL PASSWORD - SAVE THIS NOW!"
         log_warning "====================================================================="
         log_warning ""
         log_warning "  Username: admin"
@@ -683,7 +684,13 @@ setup_caddy() {
     # Create Caddy directory
     mkdir -p "$PLATFORM_ROOT/caddy"
 
-    # Generate Caddyfile
+    # Generate JWT signing key for caddy-security (if not exists)
+    generate_jwt_signing_key
+
+    # Generate users.json with password hash
+    generate_users_json
+
+    # Generate Caddyfile with caddy-security configuration
     generate_caddyfile "$CADDY_DOMAIN" "$password_hash"
 
     # Generate docker-compose for Caddy
@@ -845,6 +852,16 @@ generate_index_html() {
                     <p>$desc</p>
                     <div class=\"links\">
                         <a href=\"/dailydigest/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
+                    </div>
+                </div>"
+                    ;;
+                librechat)
+                    services_html+="
+                <div class=\"service-card\">
+                    <h3>💬 LibreChat</h3>
+                    <p>$desc</p>
+                    <div class=\"links\">
+                        <a href=\"/librechat/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
                     </div>
                 </div>"
                     ;;
@@ -1085,54 +1102,95 @@ HTMLEOF
     log_success "HTML index generated at $PLATFORM_ROOT/caddy/www/index.html"
 }
 
-generate_caddyfile() {
-    local domain=$1
-    local password_hash=$2
+generate_jwt_signing_key() {
+    log_info "Generating JWT signing key for caddy-security..."
 
-    log_info "Generating Caddyfile..."
+    # Check if key already exists in cache
+    local jwt_key=$(load_from_cache "JWT_SHARED_KEY")
 
-    # Extract domain without protocol for Caddy address
-    local caddy_address
-    local tls_config=""
-
-    if [ -z "$domain" ]; then
-        # No domain provided, use port 80
-        caddy_address=":80"
-    elif [[ "$domain" =~ ^http:// ]]; then
-        # Explicit HTTP, strip protocol
-        caddy_address="${domain#http://}"
-    elif [[ "$domain" =~ ^https:// ]]; then
-        # Explicit HTTPS, strip protocol and enable auto TLS
-        caddy_address="${domain#https://}"
-        tls_config="    # Automatic HTTPS via Let's Encrypt"
-    else
-        # No protocol, assume HTTPS
-        caddy_address="$domain"
-        tls_config="    # Automatic HTTPS via Let's Encrypt"
+    if [ -n "$jwt_key" ]; then
+        log_info "Using existing JWT key from cache"
+        return 0
     fi
 
-    # Generate HTML index file
-    generate_index_html
+    # Generate new JWT signing key
+    jwt_key=$(openssl rand -base64 32)
 
-    cat > "$PLATFORM_ROOT/caddy/Caddyfile" <<EOF
-# Caddy reverse proxy configuration for Monadical Platform
-# Generated on $(date)
+    if [ -z "$jwt_key" ]; then
+        log_error "Failed to generate JWT signing key"
+        return 1
+    fi
 
-$caddy_address {
-$tls_config
+    # Save to cache
+    save_to_cache "JWT_SHARED_KEY" "$jwt_key"
 
-    # Basic auth for all routes
-    # Regenerate with: $0 caddy new-password
-    basicauth {
-        admin $password_hash
+    log_success "JWT signing key generated and cached"
+}
+
+generate_users_json() {
+    log_info "Generating users.json for caddy-security..."
+
+    # Get cached password hash
+    local password_hash=$(load_from_cache "CADDY_PASSWORD_HASH")
+
+    if [ -z "$password_hash" ]; then
+        log_error "No password hash found in cache"
+        return 1
+    fi
+
+    # Generate UUID for user ID (or use cached one)
+    local user_id=$(load_from_cache "CADDY_USER_ID")
+    if [ -z "$user_id" ]; then
+        # Generate new UUID
+        user_id=$(cat /proc/sys/kernel/random/uuid)
+        save_to_cache "CADDY_USER_ID" "$user_id"
+    fi
+
+    # Get current timestamp
+    local created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # Create users.json file with correct format
+    cat > "$PLATFORM_ROOT/caddy/users.json" <<EOF
+{
+  "users": [
+    {
+      "id": "$user_id",
+      "username": "admin",
+      "passwords": [
+        {
+          "purpose": "generic",
+          "algorithm": "bcrypt",
+          "hash": "$password_hash",
+          "cost": 10,
+          "expired_at": "0001-01-01T00:00:00Z",
+          "created_at": "$created_at",
+          "disabled_at": "0001-01-01T00:00:00Z"
+        }
+      ],
+      "created": "$created_at",
+      "last_modified": "0001-01-01T00:00:00Z",
+      "roles": [
+        {
+          "name": "authp/admin"
+        }
+      ]
     }
+  ]
+}
+EOF
 
-    # Root path - serve HTML index
-    handle / {
-        root * /srv
-        file_server
-    }
+    log_success "users.json generated at $PLATFORM_ROOT/caddy/users.json"
+}
 
+generate_service_routes() {
+    # Generate Caddy routes for configured services only
+    local configured_services=($(get_configured_services))
+    local routes=""
+
+    for service in "${configured_services[@]}"; do
+        case "$service" in
+            contactdb)
+                routes+="
     # ContactDB Frontend
     handle /contactdb/* {
         reverse_proxy host.docker.internal:42173 {
@@ -1152,7 +1210,10 @@ $tls_config
             header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
-
+"
+                ;;
+            dataindex)
+                routes+="
     # DataIndex API
     handle_path /dataindex/* {
         reverse_proxy host.docker.internal:42180 {
@@ -1162,7 +1223,10 @@ $tls_config
             header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
-
+"
+                ;;
+            babelfish)
+                routes+="
     # Babelfish Matrix Synapse (with WebSocket support)
     handle_path /babelfish/* {
         reverse_proxy host.docker.internal:8880 {
@@ -1185,7 +1249,10 @@ $tls_config
             header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
-
+"
+                ;;
+            crm-reply)
+                routes+="
     # CRM Reply API
     handle_path /crm-reply/* {
         reverse_proxy host.docker.internal:3001 {
@@ -1195,7 +1262,10 @@ $tls_config
             header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
-
+"
+                ;;
+            meeting-prep)
+                routes+="
     # Meeting Prep Frontend
     handle /meeting-prep/* {
         reverse_proxy host.docker.internal:42380 {
@@ -1215,7 +1285,10 @@ $tls_config
             header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
-
+"
+                ;;
+            dailydigest)
+                routes+="
     # DailyDigest (Frontend and Backend merged)
     handle /dailydigest/* {
         reverse_proxy host.docker.internal:42190 {
@@ -1225,6 +1298,157 @@ $tls_config
             header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
+"
+                ;;
+            librechat)
+                routes+="
+    # LibreChat Frontend (requires auth, handled by general authorization above)
+    handle_path /librechat/* {
+        reverse_proxy host.docker.internal:3080 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+            header_down >Set-Cookie (.*) \"\$1; Path=/librechat\"
+        }
+    }
+"
+                ;;
+        esac
+    done
+
+    echo "$routes"
+}
+
+generate_caddyfile() {
+    local domain=$1
+    local password_hash=$2
+
+    log_info "Generating Caddyfile..."
+
+    # Extract domain without protocol for Caddy address
+    local caddy_address
+    local tls_config=""
+    local cookie_domain=""
+
+    if [ -z "$domain" ]; then
+        # No domain provided, use port 80
+        caddy_address=":80"
+        cookie_domain="localhost"
+    elif [[ "$domain" =~ ^http:// ]]; then
+        # Explicit HTTP, strip protocol
+        caddy_address="${domain#http://}"
+        # Extract domain for cookie (remove port)
+        cookie_domain=$(echo "$caddy_address" | sed 's/:.*//')
+    elif [[ "$domain" =~ ^https:// ]]; then
+        # Explicit HTTPS, strip protocol and enable auto TLS
+        caddy_address="${domain#https://}"
+        tls_config="    # Automatic HTTPS via Let's Encrypt"
+        cookie_domain="$caddy_address"
+    else
+        # No protocol, assume HTTPS
+        caddy_address="$domain"
+        tls_config="    # Automatic HTTPS via Let's Encrypt"
+        cookie_domain="$domain"
+    fi
+
+    # Generate HTML index file
+    generate_index_html
+
+    cat > "$PLATFORM_ROOT/caddy/Caddyfile" <<EOF
+# Caddy reverse proxy configuration for Monadical Platform
+# Generated on $(date)
+
+{
+    # Critical: Set order for security directives
+    order authenticate before respond
+    order authorize before reverse_proxy
+
+    security {
+        # Local identity store for user database
+        local identity store localdb {
+            realm local
+            path /data/users.json
+        }
+
+        # Authentication portal configuration
+        authentication portal internalai_portal {
+            # CRITICAL: Use persistent crypto key to survive restarts
+            crypto key sign-verify {env.JWT_SHARED_KEY}
+
+            # JWT token lifetime - 30 days for long sessions
+            crypto default token lifetime 2592000
+            crypto default token name internalai-token
+
+            # Enable the local user database
+            enable identity store localdb
+
+            # Cookie configuration
+            cookie domain $cookie_domain
+            cookie lifetime 2592000
+            cookie path /
+            cookie samesite lax
+
+            # UI customization
+            ui {
+                links {
+                    "Platform Home" "/" icon "las la-home"
+                    "My Identity" "/auth/whoami" icon "las la-user"
+                }
+            }
+
+            # Assign admin role to local users
+            transform user {
+                match origin local
+                action add role authp/admin
+            }
+        }
+
+        # Authorization policy
+        authorization policy internalai_policy {
+            # CRITICAL: Must use same key for token verification
+            crypto key verify {env.JWT_SHARED_KEY}
+            crypto default token name internalai-token
+
+            set auth url /auth
+            allow roles authp/admin
+
+            acl rule {
+                comment "Allow authenticated admins"
+                match role authp/admin
+                allow stop log info
+            }
+        }
+    }
+}
+
+$caddy_address {
+$tls_config
+
+    # Authentication portal routes - NO authorization on these!
+    # Must come FIRST
+    handle /auth* {
+        authenticate with internalai_portal
+    }
+
+    # Apply authorization to all OTHER routes
+    # This checks for valid JWT cookie
+    handle /* {
+        authorize with internalai_policy
+    }
+
+    # Root path - serve HTML index
+    handle / {
+        root * /srv
+        file_server
+    }
+EOF
+
+    # Generate and append service routes dynamically
+    generate_service_routes >> "$PLATFORM_ROOT/caddy/Caddyfile"
+
+    # Append closing section
+    cat >> "$PLATFORM_ROOT/caddy/Caddyfile" <<'EOF'
 
     # Logging
     log {
@@ -1267,11 +1491,23 @@ generate_caddy_compose() {
         bind_443=true
     fi
 
+    # Generate .env file with JWT key
+    generate_jwt_signing_key
+    local jwt_key=$(load_from_cache "JWT_SHARED_KEY")
+    if [ -n "$jwt_key" ]; then
+        cat > "$PLATFORM_ROOT/caddy/.env" <<EOF
+JWT_SHARED_KEY=$jwt_key
+EOF
+        log_info ".env file created with JWT_SHARED_KEY"
+    else
+        log_warning "JWT_SHARED_KEY not found in cache, .env file not created"
+    fi
+
     # Generate docker-compose with conditional ports
     cat > "$PLATFORM_ROOT/caddy/docker-compose.yml" <<'EOF'
 services:
   caddy:
-    image: caddy:2-alpine
+    image: thekevjames/caddy-security:latest
     container_name: monadical-caddy
     restart: unless-stopped
     ports:
@@ -1294,6 +1530,7 @@ EOF
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./www:/srv:ro
+      - ./users.json:/data/users.json:rw
       - caddy_data:/data
       - caddy_config:/config
     networks:
@@ -1303,6 +1540,9 @@ EOF
       - "host.docker.internal:host-gateway"
     environment:
       - CADDY_ADMIN=0.0.0.0:2019
+      - JWT_SHARED_KEY=${JWT_SHARED_KEY}
+    env_file:
+      - .env
     logging:
       driver: "json-file"
       options:
@@ -1365,6 +1605,41 @@ stop_caddy() {
     log_success "Caddy stopped"
 }
 
+reload_caddy() {
+    log_info "Reloading Caddy configuration..."
+
+    if [ ! -f "$PLATFORM_ROOT/caddy/docker-compose.yml" ]; then
+        log_warning "Caddy not configured, skipping reload"
+        return 0
+    fi
+
+    # Check if Caddy is running
+    cd "$PLATFORM_ROOT/caddy"
+    if ! docker_compose ps | grep -q "Up"; then
+        log_warning "Caddy is not running, skipping reload"
+        return 0
+    fi
+
+    # Regenerate Caddyfile with current services
+    local domain=$(load_from_cache "CADDY_DOMAIN")
+    local password_hash=$(load_from_cache "CADDY_PASSWORD_HASH")
+
+    if [ -z "$password_hash" ]; then
+        log_error "Cannot regenerate Caddyfile: password hash not found in cache"
+        return 1
+    fi
+
+    generate_caddyfile "$domain" "$password_hash"
+
+    # Reload Caddy configuration (caddy reload inside container)
+    docker exec monadical-caddy caddy reload --config /etc/caddy/Caddyfile 2>&1 | grep -v "password" || {
+        log_warning "Direct reload failed, restarting Caddy container instead..."
+        docker_compose restart
+    }
+
+    log_success "Caddy configuration reloaded"
+}
+
 cmd_regenerate_password() {
     log_header "Regenerating Caddy Password"
 
@@ -1375,7 +1650,7 @@ cmd_regenerate_password() {
 
     # Generate hash
     log_info "Generating password hash..."
-    local password_hash=$(docker run --rm caddy:2-alpine caddy hash-password --plaintext "$new_password" 2>/dev/null)
+    local password_hash=$(docker run --rm thekevjames/caddy-security:latest caddy hash-password --plaintext "$new_password" 2>/dev/null)
 
     if [ -z "$password_hash" ]; then
         log_error "Failed to generate password hash"
@@ -1385,6 +1660,9 @@ cmd_regenerate_password() {
     # Save to cache
     save_to_cache "CADDY_PASSWORD" "$new_password"
     save_to_cache "CADDY_PASSWORD_HASH" "$password_hash"
+
+    # Regenerate users.json with new password hash
+    generate_users_json
 
     # Regenerate Caddyfile
     local domain=$(load_from_cache "CADDY_DOMAIN")
@@ -1429,6 +1707,9 @@ cmd_caddy() {
             stop_caddy
             start_caddy
             ;;
+        reload)
+            reload_caddy
+            ;;
         status)
             cd "$PLATFORM_ROOT/caddy" && docker_compose ps
             ;;
@@ -1439,7 +1720,7 @@ cmd_caddy() {
             cmd_regenerate_password
             ;;
         *)
-            log_error "Usage: $0 caddy {start|stop|restart|status|logs|new-password}"
+            log_error "Usage: $0 caddy {start|stop|restart|reload|status|logs|new-password}"
             exit 1
             ;;
     esac
@@ -1934,6 +2215,79 @@ EOF
     log_success "DailyDigest configured"
 }
 
+configure_librechat() {
+    log_header "Configuring LibreChat"
+
+    # Derive URLs from public base URL
+    local public_base_url=$(load_from_cache "PUBLIC_BASE_URL")
+    local LIBRECHAT_URL="${public_base_url:-http://localhost}/librechat/"
+
+    log_info "Using LibreChat URL: $LIBRECHAT_URL"
+
+    # Get LiteLLM configuration (reuse existing values if already cached)
+    prompt_or_cache "LITELLM_API_KEY" "LiteLLM API key" "" true "$PLATFORM_ROOT/librechat/.env"
+    prompt_or_cache "LITELLM_BASE_URL" "LiteLLM base URL" "https://litellm-notrack.app.monadical.io" false "$PLATFORM_ROOT/librechat/.env"
+    prompt_or_cache "LITELLM_MODEL" "Default LiteLLM model" "GLM-4.5-Air-FP8-dev" false "$PLATFORM_ROOT/librechat/.env"
+
+    # Copy .env.example to .env
+    if [ -f "$PLATFORM_ROOT/librechat/.env.example" ]; then
+        log_info "Copying .env.example to .env..."
+        cp "$PLATFORM_ROOT/librechat/.env.example" "$PLATFORM_ROOT/librechat/.env"
+    else
+        log_warning ".env.example not found, creating basic .env file"
+        touch "$PLATFORM_ROOT/librechat/.env"
+    fi
+
+    # Update DOMAIN_CLIENT and DOMAIN_SERVER in .env
+    if grep -q "^DOMAIN_CLIENT=" "$PLATFORM_ROOT/librechat/.env"; then
+        sed -i "s|^DOMAIN_CLIENT=.*|DOMAIN_CLIENT=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
+    else
+        echo "DOMAIN_CLIENT=${LIBRECHAT_URL}" >> "$PLATFORM_ROOT/librechat/.env"
+    fi
+
+    if grep -q "^DOMAIN_SERVER=" "$PLATFORM_ROOT/librechat/.env"; then
+        sed -i "s|^DOMAIN_SERVER=.*|DOMAIN_SERVER=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
+    else
+        echo "DOMAIN_SERVER=${LIBRECHAT_URL}" >> "$PLATFORM_ROOT/librechat/.env"
+    fi
+
+    # Create docker-compose.override.yml
+    cat > "$PLATFORM_ROOT/librechat/docker-compose.override.yml" <<EOF
+services:
+  api:
+    volumes:
+      - ./librechat.yaml:/app/librechat.yaml
+EOF
+
+    # Create librechat.yaml with LiteLLM configuration
+    cat > "$PLATFORM_ROOT/librechat/librechat.yaml" <<EOF
+version: 1.2.1
+
+endpoints:
+  custom:
+    - name: "Monadical LiteLLM"
+      apiKey: "${LITELLM_API_KEY}"
+      baseURL: "${LITELLM_BASE_URL}"
+      models:
+        default: ["${LITELLM_MODEL}"]
+      titleConvo: true
+      titleModel: "current_model"
+      titleMessageRole: "user"
+      summarize: false
+      summaryModel: "current_model"
+      forcePrompt: false
+mcpServers:
+  contactdb:
+    type: streamable-http
+    url: http://host.docker.internal:42800/mcp/
+  dataindex:
+    type: streamable-http
+    url: http://host.docker.internal:42180/dataindex/mcp/
+EOF
+
+    log_success "LibreChat configured"
+}
+
 # Generic function to configure a service by ID
 configure_service() {
     local service_id=$1
@@ -1956,6 +2310,9 @@ configure_service() {
             ;;
         dailydigest)
             configure_dailydigest
+            ;;
+        librechat)
+            configure_librechat
             ;;
         *)
             log_warning "No configuration function for $service_id"
@@ -2061,6 +2418,9 @@ start_service() {
 
     cd "$PLATFORM_ROOT"
     log_success "$service_id started"
+
+    # Reload Caddy configuration to include the new service
+    reload_caddy
 }
 
 # Initial setup for a service (builds and starts on first run)
@@ -2148,6 +2508,9 @@ stop_service() {
 
     cd "$PLATFORM_ROOT"
     log_success "$service_id stopped"
+
+    # Reload Caddy configuration to remove the stopped service
+    reload_caddy
 }
 
 update_service() {
