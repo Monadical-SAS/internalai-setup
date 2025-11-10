@@ -2709,6 +2709,9 @@ cmd_upgrade() {
     else
         update_service "$service_name"
     fi
+
+    # Reload Caddy configuration to remove the service
+    reload_caddy
 }
 
 cmd_enable() {
@@ -2768,6 +2771,9 @@ cmd_enable() {
 
     # Configure the service using the generic function
     configure_service "$service_name"
+
+    # Reload Caddy configuration to include the new service
+    reload_caddy
 
     # Update cache to include this service in optional services
     local cached_services=$(load_from_cache "SELECTED_OPTIONAL_SERVICES")
@@ -2844,6 +2850,9 @@ cmd_disable() {
             save_to_cache "SELECTED_OPTIONAL_SERVICES" "$new_services"
         fi
     fi
+
+    # Reload Caddy configuration to remove the service
+    reload_caddy
 
     log_success "Service $service_name disabled"
 }
