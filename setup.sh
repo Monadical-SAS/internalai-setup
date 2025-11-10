@@ -42,14 +42,6 @@ AVAILABLE_SERVICES=(
     "dailydigest|https://github.com/Monadical-SAS/dailydigest.git|main|42190|Stale relationship tracker for ContactDB and DataIndex|false"
 )
 
-# DataIndex ingestors
-DATAINDEX_INGESTORS=(
-    "calendar|ICS Calendar (Fastmail Calendar, iCal)|DATAINDEX_PERSONAL"
-    "zulip|Zulip Chat|DATAINDEX_ZULIP"
-    "email|Email (mbsync/notmuch)|DATAINDEX_EMAIL"
-    "reflector|Reflector API|DATAINDEX_REFLECTOR"
-)
-
 # ============================================================================
 # Logging Functions
 # ============================================================================
@@ -577,61 +569,6 @@ select_services() {
     fi
 
     log_success "Selected: ${SELECTED_SERVICES[*]}"
-}
-
-# ============================================================================
-# DataIndex Ingestor Selection
-# ============================================================================
-
-SELECTED_INGESTORS=()
-
-select_ingestors() {
-    log_header "DataIndex Ingestors"
-
-    # Check cache first - use it automatically if it exists
-    local cached_ingestors=$(load_from_cache "SELECTED_INGESTORS")
-    if [ -n "$cached_ingestors" ]; then
-        if [ "$cached_ingestors" = "none" ]; then
-            log_info "Using cached selection: No ingestors"
-            return
-        fi
-        IFS=',' read -ra SELECTED_INGESTORS <<< "$cached_ingestors"
-        log_info "Using cached ingestor selection: ${#SELECTED_INGESTORS[@]} ingestors"
-        return
-    fi
-
-    echo "Available ingestors:"
-    echo ""
-
-    local index=1
-    for ingestor_def in "${DATAINDEX_INGESTORS[@]}"; do
-        IFS='|' read -r id name prefix <<< "$ingestor_def"
-        echo -e "  ${CYAN}${index}.${NC} ${name}"
-        ((index++))
-    done
-
-    echo ""
-    prompt INGESTORS_INPUT "Enter ingestor numbers (comma-separated) or 'none'" "none"
-
-    if [ "$INGESTORS_INPUT" = "none" ]; then
-        log_info "No ingestors selected"
-        save_to_cache "SELECTED_INGESTORS" "none"
-        return
-    fi
-
-    IFS=',' read -ra INDICES <<< "$INGESTORS_INPUT"
-    for idx in "${INDICES[@]}"; do
-        idx=$(echo "$idx" | xargs)
-        ingestor_def="${DATAINDEX_INGESTORS[$((idx-1))]}"
-        IFS='|' read -r id name prefix <<< "$ingestor_def"
-        SELECTED_INGESTORS+=("$id|$name|$prefix")
-    done
-
-    # Save to cache
-    local ingestors_str=$(IFS=','; echo "${SELECTED_INGESTORS[*]}")
-    save_to_cache "SELECTED_INGESTORS" "$ingestors_str"
-
-    log_success "Selected ingestors: ${#SELECTED_INGESTORS[@]}"
 }
 
 # ============================================================================
@@ -1582,31 +1519,6 @@ EOF
 configure_dataindex() {
     log_header "Configuring DataIndex"
 
-    # Always prompt for ingestors (unless cached)
-    select_ingestors
-
-    # Auto-add babelfish ingestor if babelfish service is selected
-    local has_babelfish=false
-    for service_id in "${SELECTED_SERVICES[@]}"; do
-        if [ "$service_id" = "babelfish" ]; then
-            # Check if babelfish ingestor is already in the list
-            if [ ${#SELECTED_INGESTORS[@]} -gt 0 ]; then
-                for ing in "${SELECTED_INGESTORS[@]}"; do
-                    if [[ "$ing" == babelfish* ]]; then
-                        has_babelfish=true
-                        break
-                    fi
-                done
-            fi
-
-            if [ "$has_babelfish" = false ]; then
-                SELECTED_INGESTORS+=("babelfish|Babelfish (auto-configured)|DATAINDEX_BABELFISH")
-                log_info "Auto-added Babelfish ingestor for DataIndex"
-            fi
-            break
-        fi
-    done
-
     # Required variables - check existing .env file if cache is empty
     prompt_or_cache "DATAINDEX_POSTGRES_PASSWORD" "PostgreSQL password for DataIndex" "auto" true "$PLATFORM_ROOT/dataindex/.env"
 
@@ -1625,81 +1537,7 @@ CONTACTDB_URL_API_PUBLIC=$contactdb_url_backend
 REDIS_URL=redis://localhost:42170
 DATABASE_URL=postgresql://dataindex:$DATAINDEX_POSTGRES_PASSWORD@localhost:42434/dataindex
 BASE_PATH=/dataindex/
-
-# Ingestors
 EOF
-
-    # Configure each selected ingestor
-    if [ ${#SELECTED_INGESTORS[@]} -gt 0 ]; then
-        for ingestor_def in "${SELECTED_INGESTORS[@]}"; do
-            IFS='|' read -r id name prefix <<< "$ingestor_def"
-
-            case "$id" in
-                calendar)
-                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
-                    echo "# ICS Calendar Ingestor" >> "$PLATFORM_ROOT/dataindex/.env"
-                    prompt_or_cache "DATAINDEX_CALENDAR_URL" "ICS Calendar URL (e.g., Fastmail Calendar iCal)" ""
-                    if [ -n "$DATAINDEX_CALENDAR_URL" ]; then
-                        echo "${prefix}_TYPE=ics_calendar" >> "$PLATFORM_ROOT/dataindex/.env"
-                        echo "${prefix}_ICS_URL=$DATAINDEX_CALENDAR_URL" >> "$PLATFORM_ROOT/dataindex/.env"
-                    fi
-                    ;;
-
-                zulip)
-                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
-                    echo "# Zulip Ingestor" >> "$PLATFORM_ROOT/dataindex/.env"
-                    prompt_or_cache "DATAINDEX_ZULIP_URL" "Zulip server URL" ""
-                    prompt_or_cache "DATAINDEX_ZULIP_EMAIL" "Zulip bot email" ""
-                    prompt_or_cache "DATAINDEX_ZULIP_API_KEY" "Zulip API key" "" true
-
-                    if [ -n "$DATAINDEX_ZULIP_URL" ]; then
-                        echo "${prefix}_TYPE=zulip" >> "$PLATFORM_ROOT/dataindex/.env"
-                        echo "${prefix}_ZULIP_URL=$DATAINDEX_ZULIP_URL" >> "$PLATFORM_ROOT/dataindex/.env"
-                        echo "${prefix}_ZULIP_EMAIL=$DATAINDEX_ZULIP_EMAIL" >> "$PLATFORM_ROOT/dataindex/.env"
-                        echo "${prefix}_ZULIP_API_KEY=$DATAINDEX_ZULIP_API_KEY" >> "$PLATFORM_ROOT/dataindex/.env"
-                    fi
-                    ;;
-
-                email)
-                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
-                    echo "# Email Ingestor" >> "$PLATFORM_ROOT/dataindex/.env"
-                    prompt_or_cache "DATAINDEX_EMAIL_IMAP_HOST" "IMAP host (e.g., imap.fastmail.com)" "imap.fastmail.com"
-                    prompt_or_cache "DATAINDEX_EMAIL_IMAP_USER" "IMAP username/email" ""
-                    prompt_or_cache "DATAINDEX_EMAIL_IMAP_PASS" "IMAP password" "" true
-
-                    if [ -n "$DATAINDEX_EMAIL_IMAP_HOST" ]; then
-                        echo "${prefix}_TYPE=mbsync_email" >> "$PLATFORM_ROOT/dataindex/.env"
-                        echo "${prefix}_IMAP_HOST=$DATAINDEX_EMAIL_IMAP_HOST" >> "$PLATFORM_ROOT/dataindex/.env"
-                        echo "${prefix}_IMAP_USER=$DATAINDEX_EMAIL_IMAP_USER" >> "$PLATFORM_ROOT/dataindex/.env"
-                        echo "${prefix}_IMAP_PASS=$DATAINDEX_EMAIL_IMAP_PASS" >> "$PLATFORM_ROOT/dataindex/.env"
-                    fi
-                    ;;
-
-                reflector)
-                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
-                    echo "# Reflector Ingestor" >> "$PLATFORM_ROOT/dataindex/.env"
-                    prompt_or_cache "DATAINDEX_REFLECTOR_API_KEY" "Reflector API key" "" true
-                    prompt_or_cache "DATAINDEX_REFLECTOR_API_URL" "Reflector API URL" "https://api-reflector.monadical.com"
-
-                    if [ -n "$DATAINDEX_REFLECTOR_API_KEY" ]; then
-                        echo "${prefix}_TYPE=reflector" >> "$PLATFORM_ROOT/dataindex/.env"
-                        echo "${prefix}_API_KEY=$DATAINDEX_REFLECTOR_API_KEY" >> "$PLATFORM_ROOT/dataindex/.env"
-                        echo "${prefix}_API_URL=$DATAINDEX_REFLECTOR_API_URL" >> "$PLATFORM_ROOT/dataindex/.env"
-                    fi
-                    ;;
-
-                babelfish)
-                    echo "" >> "$PLATFORM_ROOT/dataindex/.env"
-                    echo "# Babelfish Ingestor (auto-configured)" >> "$PLATFORM_ROOT/dataindex/.env"
-                    # Auto-configured, no prompt needed
-                    local babelfish_url="http://host.docker.internal:8000"
-                    echo "${prefix}_TYPE=babelfish" >> "$PLATFORM_ROOT/dataindex/.env"
-                    echo "${prefix}_BASE_URL=$babelfish_url" >> "$PLATFORM_ROOT/dataindex/.env"
-                    log_info "Babelfish ingestor configured with URL: $babelfish_url"
-                    ;;
-            esac
-        done
-    fi
 
     log_success "DataIndex configured"
 }
