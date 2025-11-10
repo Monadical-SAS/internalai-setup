@@ -2697,7 +2697,7 @@ install() {
 cmd_self_update() {
     log_header "Self-Update InternalAI CLI"
 
-    local INSTALL_URL="https://github.com/Monadical-SAS/internalai-setup/raw/main/setup.sh"
+    local INSTALL_URL="https://github.com/Monadical-SAS/internalai-setup/raw/main/setup.sh?t=$(date +%s)"
     local SCRIPT_PATH="$(realpath "$0")"
 
     log_info "Current installation: $SCRIPT_PATH"
