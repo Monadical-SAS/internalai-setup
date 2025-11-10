@@ -39,7 +39,7 @@ AVAILABLE_SERVICES=(
     "babelfish|https://github.com/Monadical-SAS/babelfish.git|authless-ux|8880|Universal communications bridge (Matrix homeserver)|false"
     # "crm-reply|https://github.com/Monadical-SAS/crm-reply.git|main|3001|AI-powered CRM reply assistant|false"
     "meeting-prep|https://github.com/Monadical-SAS/meeting-prep.git|dataindex-contactdb-integration|42380|Meeting preparation assistant|false"
-    "dailydigest|https://github.com/Monadical-SAS/dailydigest.git|main|42190|Stale relationship tracker for ContactDB and DataIndex|false"
+    "dailydigest|https://github.com/Monadical-SAS/dailydigest.git|main|42190|Stale relationship and missing reply digest|false"
     "librechat|https://github.com/danny-avila/LibreChat.git|main|3080|AI chat interface with multiple model support|false"
 )
 
@@ -802,6 +802,7 @@ generate_index_html() {
                     <p>$desc</p>
                     <div class=\"links\">
                         <a href=\"/contactdb/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
+                        <a href=\"/contactdb-api/\" target=\"_blank\" class=\"btn btn-secondary\">API</a>
                     </div>
                 </div>"
                     ;;
@@ -862,6 +863,7 @@ generate_index_html() {
                     <p>$desc</p>
                     <div class=\"links\">
                         <a href=\"/librechat/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
+                        <a href=\"/librechat/register\" target=\"_blank\" class=\"btn btn-secondary\">Register</a>
                     </div>
                 </div>"
                     ;;
