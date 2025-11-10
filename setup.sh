@@ -93,7 +93,24 @@ prompt() {
     fi
 
     if [ "$is_secret" = true ]; then
-        read -s -p "$(echo -e ${YELLOW}${prompt_text}: ${NC})" value
+        echo -ne "${YELLOW}${prompt_text}: ${NC}"
+        value=""
+        while IFS= read -r -s -n1 char; do
+            # Enter key pressed
+            if [[ $char == $'\0' ]]; then
+                break
+            fi
+            # Backspace pressed
+            if [[ $char == $'\177' ]] || [[ $char == $'\b' ]]; then
+                if [ ${#value} -gt 0 ]; then
+                    value="${value%?}"
+                    echo -ne "\b \b"
+                fi
+            else
+                value+="$char"
+                echo -n "*"
+            fi
+        done
         echo ""
     else
         read -p "$(echo -e ${YELLOW}${prompt_text}: ${NC})" value
