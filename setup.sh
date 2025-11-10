@@ -2697,11 +2697,23 @@ install() {
 cmd_self_update() {
     log_header "Self-Update InternalAI CLI"
 
-    local INSTALL_URL="https://github.com/Monadical-SAS/internalai-setup/raw/main/setup.sh?t=$(date +%s)"
+    local REPO="Monadical-SAS/internalai-setup"
     local SCRIPT_PATH="$(realpath "$0")"
 
     log_info "Current installation: $SCRIPT_PATH"
-    log_info "Downloading latest version from $INSTALL_URL..."
+    log_info "Fetching latest version from GitHub..."
+
+    # Get the latest commit SHA to bypass CDN cache
+    local LATEST_SHA=$(curl -fsSL "https://api.github.com/repos/$REPO/commits/main" | grep -o '"sha": "[^"]*"' | head -1 | cut -d'"' -f4)
+
+    if [ -z "$LATEST_SHA" ]; then
+        log_error "Failed to fetch latest commit SHA from GitHub API"
+        exit 1
+    fi
+
+    log_info "Latest commit: ${LATEST_SHA:0:7}"
+
+    local INSTALL_URL="https://raw.githubusercontent.com/$REPO/$LATEST_SHA/setup.sh"
 
     # Create temporary file
     TMP_FILE=$(mktemp)
