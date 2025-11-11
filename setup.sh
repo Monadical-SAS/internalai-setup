@@ -1433,24 +1433,24 @@ $tls_config
         authenticate with internalai_portal
     }
 
-    # Apply authorization to all OTHER routes
-    # This checks for valid JWT cookie
-    handle /* {
+    # Apply authorization to all OTHER routes (services + root)
+    # This checks for valid JWT cookie and contains all protected routes
+    route /* {
         authorize with internalai_policy
-    }
 
-    # Root path - serve HTML index
-    handle / {
-        root * /srv
-        file_server
-    }
+        # Root path - serve HTML index
+        handle / {
+            root * /srv
+            file_server
+        }
 EOF
 
-    # Generate and append service routes dynamically
+    # Generate and append service routes dynamically (inside the route block)
     generate_service_routes >> "$PLATFORM_ROOT/caddy/Caddyfile"
 
-    # Append closing section
+    # Append closing section (closes route block and site block)
     cat >> "$PLATFORM_ROOT/caddy/Caddyfile" <<'EOF'
+    }
 
     # Logging
     log {
