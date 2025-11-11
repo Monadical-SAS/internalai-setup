@@ -1331,27 +1331,21 @@ generate_caddyfile() {
     # Extract domain without protocol for Caddy address
     local caddy_address
     local tls_config=""
-    local cookie_domain=""
 
     if [ -z "$domain" ]; then
         # No domain provided, use port 80
         caddy_address=":80"
-        cookie_domain="localhost"
     elif [[ "$domain" =~ ^http:// ]]; then
         # Explicit HTTP, strip protocol
         caddy_address="${domain#http://}"
-        # Extract domain for cookie (remove port)
-        cookie_domain=$(echo "$caddy_address" | sed 's/:.*//')
     elif [[ "$domain" =~ ^https:// ]]; then
         # Explicit HTTPS, strip protocol and enable auto TLS
         caddy_address="${domain#https://}"
         tls_config="    # Automatic HTTPS via Let's Encrypt"
-        cookie_domain="$caddy_address"
     else
         # No protocol, assume HTTPS
         caddy_address="$domain"
         tls_config="    # Automatic HTTPS via Let's Encrypt"
-        cookie_domain="$domain"
     fi
 
     # Generate HTML index file
@@ -1386,10 +1380,7 @@ generate_caddyfile() {
             enable identity store localdb
 
             # Cookie configuration
-            cookie domain $cookie_domain
             cookie lifetime 2592000
-            cookie path /
-            cookie samesite lax
 
             # UI customization
             ui {
