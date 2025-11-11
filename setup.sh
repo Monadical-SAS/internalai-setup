@@ -1406,6 +1406,15 @@ generate_caddyfile() {
             set auth url /auth
             allow roles authp/admin
 
+            # Allow anonymous access to Matrix API endpoints
+            acl rule {
+                comment "Allow Matrix API access without auth"
+                match path /_matrix/*
+                match path /_synapse/*
+                match path /.well-known/matrix/*
+                allow stop log info
+            }
+
             acl rule {
                 comment "Allow authenticated admins"
                 match role authp/admin
@@ -1422,6 +1431,36 @@ $tls_config
     # Must come FIRST
     handle /auth* {
         authenticate with internalai_portal
+    }
+
+    # Matrix Synapse API endpoints (must come before general authorization)
+    handle /_matrix/* {
+        reverse_proxy host.docker.internal:8448 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+            # WebSocket support for Matrix sync
+            header_up Connection {http.request.header.Connection}
+            header_up Upgrade {http.request.header.Upgrade}
+        }
+    }
+
+    # Matrix Synapse admin API
+    handle /_synapse/* {
+        reverse_proxy host.docker.internal:8448 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Matrix well-known delegation
+    handle /.well-known/matrix/* {
+        reverse_proxy host.docker.internal:8090 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+        }
     }
 
     # Apply authorization to all OTHER routes (services + root)
@@ -2057,7 +2096,62 @@ BACKUP_ENCRYPTION_KEY=$BABELFISH_BACKUP_KEY
 BACKUP_DESTINATION=./backups
 EOF
 
-    log_success "Babelfish configured"
+    # Configure Element Web with proper domain
+    local caddy_domain=$(load_from_cache "CADDY_DOMAIN")
+    local matrix_base_url="https://$caddy_domain"
+
+    # If no domain or using localhost, use http://localhost:8448
+    if [ -z "$caddy_domain" ] || [[ "$caddy_domain" == "localhost"* ]] || [[ "$caddy_domain" == *":80"* ]]; then
+        matrix_base_url="http://localhost:8448"
+    fi
+
+    log_info "Generating Element config with Matrix server at: $matrix_base_url"
+
+    cat > "$PLATFORM_ROOT/babelfish/example-config/element/config.json" <<EOF
+{
+    "default_server_config": {
+        "m.homeserver": {
+            "base_url": "$matrix_base_url",
+            "server_name": "localhost"
+        }
+    },
+    "disable_custom_urls": false,
+    "disable_guests": true,
+    "disable_login_language_selector": false,
+    "disable_3pid_login": true,
+    "brand": "Universal Conversations Manager",
+    "integrations_ui_url": "",
+    "integrations_rest_url": "",
+    "integrations_widgets_urls": [],
+    "bug_report_endpoint_url": "",
+    "features": {
+        "feature_thread": true,
+        "feature_pinning": true,
+        "feature_state_counters": true
+    },
+    "default_federate": false,
+    "default_theme": "light",
+    "room_directory": {
+        "servers": ["localhost"]
+    },
+    "enable_presence_by_hs_url": {
+        "$matrix_base_url": true
+    },
+    "setting_defaults": {
+        "breadcrumbs": true
+    },
+    "jitsi": {
+        "preferred_domain": ""
+    },
+    "element_call": {
+        "url": "",
+        "use_exclusively": false
+    },
+    "map_style_url": ""
+}
+EOF
+
+    log_success "Babelfish configured with Element pointing to $matrix_base_url"
 }
 
 configure_crm_reply() {
