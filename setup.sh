@@ -1229,20 +1229,19 @@ generate_service_routes() {
                 ;;
             babelfish)
                 routes+="
-    # Babelfish Matrix Synapse (with WebSocket support)
+    # Babelfish Bridge UI (Management Interface and API)
+    # Using handle_path strips /babelfish prefix when proxying
+    # So /babelfish/api/bridges/status -> port 3000 as /api/bridges/status
     handle_path /babelfish/* {
-        reverse_proxy host.docker.internal:8880 {
+        reverse_proxy host.docker.internal:3000 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
             header_up X-Forwarded-For {http.request.remote.host}
             header_up X-Forwarded-Proto {http.request.scheme}
-            # WebSocket support
-            header_up Connection {http.request.header.Connection}
-            header_up Upgrade {http.request.header.Upgrade}
         }
     }
 
-    # Babelfish API
+    # Babelfish Core API
     handle_path /babelfish-api/* {
         reverse_proxy host.docker.internal:8000 {
             header_up Host {http.reverse_proxy.upstream.hostport}
@@ -1408,10 +1407,33 @@ generate_caddyfile() {
 
             # Allow anonymous access to Matrix API endpoints
             acl rule {
-                comment "Allow Matrix API access without auth"
+                comment "Allow Matrix client API access without auth"
                 match path /_matrix/*
+                allow stop log info
+            }
+
+            acl rule {
+                comment "Allow Synapse admin API access without auth"
                 match path /_synapse/*
+                allow stop log info
+            }
+
+            acl rule {
+                comment "Allow Matrix well-known access without auth"
                 match path /.well-known/matrix/*
+                allow stop log info
+            }
+
+            # Allow anonymous access to Babelfish routes
+            acl rule {
+                comment "Allow Babelfish Bridge UI access without auth"
+                match path /babelfish/*
+                allow stop log info
+            }
+
+            acl rule {
+                comment "Allow Babelfish Core API access without auth"
+                match path /babelfish-api/*
                 allow stop log info
             }
 
@@ -2533,14 +2555,15 @@ initial_service_setup() {
         fi
         log_success "Babelfish setup completed"
 
-        # Babelfish's make setup doesn't start services, so start them
-        log_info "Starting babelfish services..."
-        docker_compose up -d 2>&1 | grep -v "password" || {
-            log_error "Failed to start $service_id"
-            docker_compose logs --tail=50
+        # Use make up to start services with proper permissions and token setup
+        log_info "Starting babelfish services with 'make up'..."
+        if ! make up 2>&1 | grep -v "password"; then
+            log_error "make up failed for babelfish"
+            log_info "Check logs for details"
+            make logs
             cd "$PLATFORM_ROOT"
             return 1
-        }
+        fi
     else
         # All other services: just build and start directly
         log_info "Building and starting $service_id..."
