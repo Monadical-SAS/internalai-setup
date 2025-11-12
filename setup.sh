@@ -2048,8 +2048,14 @@ clone_services() {
                 if [ -d "$PLATFORM_ROOT/$id/.git" ]; then
                     log_info "$id already cloned, pulling latest changes..."
                     cd "$PLATFORM_ROOT/$id"
+
+                    # Discard any local changes before pulling
+                    log_info "Discarding local changes..."
+                    git reset --hard HEAD 2>&1 | grep -v "password"
+                    git clean -fd 2>&1 | grep -v "password"
+
                     git pull 2>&1 | grep -v "password" || {
-                        log_warning "Failed to pull latest changes for $id (might be on a different branch or have local changes)"
+                        log_warning "Failed to pull latest changes for $id (might be on a different branch)"
                     }
                     cd "$PLATFORM_ROOT"
                     log_success "Updated $id"
@@ -2129,7 +2135,11 @@ EOF
 
     log_info "Generating Element config with Matrix server at: $matrix_base_url"
 
-    cat > "$PLATFORM_ROOT/babelfish/example-config/element/config.json" <<EOF
+    # Create config directory if it doesn't exist
+    mkdir -p "$PLATFORM_ROOT/babelfish/config/element"
+
+    # Write to config directory (gitignored), not example-config (tracked in git)
+    cat > "$PLATFORM_ROOT/babelfish/config/element/config.json" <<EOF
 {
     "default_server_config": {
         "m.homeserver": {
@@ -2667,6 +2677,12 @@ update_service() {
     # Pull latest changes
     log_info "Pulling latest changes for $service_id..."
     cd "$service_path"
+
+    # Discard any local changes before pulling
+    log_info "Discarding local changes..."
+    git reset --hard HEAD 2>&1 | grep -v "password"
+    git clean -fd 2>&1 | grep -v "password"
+
     git pull 2>&1 | grep -v "password" || {
         log_warning "Failed to pull latest changes for $service_id"
     }
