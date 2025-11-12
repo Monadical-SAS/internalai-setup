@@ -2051,8 +2051,8 @@ clone_services() {
 
                     # Discard any local changes before pulling
                     log_info "Discarding local changes..."
-                    git reset --hard HEAD 2>&1 | grep -v "password"
-                    git clean -fd 2>&1 | grep -v "password"
+                    git reset --hard HEAD 2>&1 | grep -v "password" || true
+                    git clean -fd 2>&1 | grep -v "password" || true
 
                     git pull 2>&1 | grep -v "password" || {
                         log_warning "Failed to pull latest changes for $id (might be on a different branch)"
@@ -2680,8 +2680,8 @@ update_service() {
 
     # Discard any local changes before pulling
     log_info "Discarding local changes..."
-    git reset --hard HEAD 2>&1 | grep -v "password"
-    git clean -fd 2>&1 | grep -v "password"
+    git reset --hard HEAD 2>&1 | grep -v "password" || true
+    git clean -fd 2>&1 | grep -v "password" || true
 
     git pull 2>&1 | grep -v "password" || {
         log_warning "Failed to pull latest changes for $service_id"
