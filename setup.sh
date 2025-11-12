@@ -2800,6 +2800,24 @@ cmd_stop() {
     fi
 }
 
+cmd_restart() {
+    local service_name=$1
+
+    if [ -z "$service_name" ]; then
+        log_error "Usage: $0 restart <service|all>"
+        echo ""
+        echo "Configured services:"
+        for svc in $(get_configured_services); do
+            echo "  - $svc"
+        done
+        exit 1
+    fi
+
+    log_header "Restarting $([ "$service_name" = "all" ] && echo "All Services" || echo "$service_name")"
+    cmd_stop "$service_name"
+    cmd_start "$service_name"
+}
+
 cmd_upgrade() {
     local service_name=$1
 
@@ -3268,6 +3286,7 @@ show_usage() {
     echo "  status                 - Show running services and container statuses"
     echo "  start <service|all>    - Start specific service or all services"
     echo "  stop <service|all>     - Stop specific service or all services"
+    echo "  restart <service|all>  - Restart specific service or all services"
     echo "  update                 - Update the internalai CLI to the latest version"
     echo "  upgrade <service|all>  - Upgrade service (stop, pull, build, start)"
     echo "  enable <service>       - Enable and configure a new service"
@@ -3283,6 +3302,7 @@ show_usage() {
     echo "  $0 update              # Update internalai CLI"
     echo "  $0 start all           # Start all configured services"
     echo "  $0 stop contactdb      # Stop contactdb service"
+    echo "  $0 restart babelfish   # Restart babelfish service"
     echo "  $0 upgrade babelfish   # Upgrade babelfish service"
     echo "  $0 upgrade all         # Upgrade all services"
     echo "  $0 enable crm-reply    # Enable CRM Reply service"
@@ -3318,6 +3338,9 @@ main() {
             ;;
         stop)
             cmd_stop "$service_arg"
+            ;;
+        restart)
+            cmd_restart "$service_arg"
             ;;
         update)
             cmd_self_update
