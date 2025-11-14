@@ -1379,6 +1379,7 @@ generate_caddyfile() {
             enable identity store localdb
 
             # Cookie configuration
+            cookie domain $caddy_address
             cookie lifetime 2592000
 
             # UI customization
