@@ -2618,11 +2618,13 @@ stop_service() {
     cd "$service_path"
 
     if [ -f "docker-compose.yml" ]; then
-        docker_compose down 2>&1 | grep -v "password" || {
-            log_error "Failed to stop $service_id"
+        docker_compose down 2>&1 | grep -v "password" || true
+        # Verify containers are actually stopped
+        if [ -n "$(docker_compose ps -q)" ]; then
+            log_error "Failed to stop $service_id - containers still running"
             cd "$PLATFORM_ROOT"
             return 1
-        }
+        fi
     else
         log_warning "No docker-compose.yml found for $service_id"
     fi
