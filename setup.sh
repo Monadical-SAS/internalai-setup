@@ -1213,7 +1213,7 @@ generate_service_routes() {
             dataindex)
                 routes+="
     # DataIndex API
-    handle_path /dataindex/* {
+    handle /dataindex/* {
         reverse_proxy host.docker.internal:42180 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
