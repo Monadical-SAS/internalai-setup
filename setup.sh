@@ -1198,8 +1198,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:42173 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 
@@ -1208,8 +1206,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:42800 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 "
@@ -1221,8 +1217,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:42180 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 "
@@ -1236,8 +1230,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:3000 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 
@@ -1246,8 +1238,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:8000 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 "
@@ -1259,8 +1249,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:3001 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 "
@@ -1272,8 +1260,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:42380 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 
@@ -1282,8 +1268,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:42381 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 "
@@ -1295,8 +1279,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:42190 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 "
@@ -1308,8 +1290,6 @@ generate_service_routes() {
         reverse_proxy host.docker.internal:3080 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
             header_down >Set-Cookie (.*) \"\$1; Path=/librechat\"
         }
     }
@@ -1461,8 +1441,6 @@ $tls_config
         reverse_proxy host.docker.internal:8448 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
             # WebSocket support for Matrix sync
             header_up Connection {http.request.header.Connection}
             header_up Upgrade {http.request.header.Upgrade}
@@ -1474,8 +1452,6 @@ $tls_config
         reverse_proxy host.docker.internal:8448 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.scheme}
         }
     }
 
