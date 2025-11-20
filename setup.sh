@@ -1240,6 +1240,14 @@ generate_service_routes() {
             header_up X-Real-IP {http.request.remote.host}
         }
     }
+
+    # Element Web (Matrix Web Client)
+    handle_path /element/* {
+        reverse_proxy host.docker.internal:8880 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+        }
+    }
 "
                 ;;
             crm-reply)
