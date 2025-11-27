@@ -823,7 +823,7 @@ generate_index_html() {
                     <p>$desc</p>
                     <div class=\"links\">
                         <a href=\"/babelfish/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
-                        <a href=\"/babelfish/chat\" target=\"_blank\" class=\"btn btn-secondary\">Chat</a>
+                        <a href=\"/babelfish/chat/\" target=\"_blank\" class=\"btn btn-secondary\">Chat</a>
                     </div>
                 </div>"
                     ;;
