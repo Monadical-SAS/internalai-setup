@@ -823,7 +823,7 @@ generate_index_html() {
                     <p>$desc</p>
                     <div class=\"links\">
                         <a href=\"/babelfish/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
-                        <a href=\"/babelfish/chat/\" target=\"_blank\" class=\"btn btn-secondary\">Chat</a>
+                        <a href=\"/babelfish/chat\" target=\"_blank\" class=\"btn btn-secondary\">Chat</a>
                     </div>
                 </div>"
                     ;;
@@ -1224,7 +1224,17 @@ generate_service_routes() {
                 ;;
             babelfish)
                 routes+="
-    # Element Web (Matrix Web Client)
+    # Element Web - Auto-login landing page (exact match, no trailing slash)
+    # This serves the auto-login page that sets up credentials and redirects to Element
+    handle /babelfish/chat {
+        rewrite * /element-autologin
+        reverse_proxy host.docker.internal:3000 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+        }
+    }
+
+    # Element Web (Matrix Web Client) - with trailing slash or subpaths
     # MUST come before general /babelfish/* handler to match first
     handle_path /babelfish/chat/* {
         reverse_proxy host.docker.internal:8880 {
@@ -1403,6 +1413,43 @@ $tls_config
     # Must come FIRST
     handle /auth* {
         authenticate with internalai_portal
+    }
+
+    # Matrix Synapse API endpoints (NO authorization - Matrix has its own auth)
+    # Must come BEFORE the authorization route block
+    handle /_matrix/* {
+        reverse_proxy host.docker.internal:8448 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+            # WebSocket support for Matrix sync
+            header_up Connection {http.request.header.Connection}
+            header_up Upgrade {http.request.header.Upgrade}
+        }
+    }
+
+    # Matrix Synapse admin API
+    handle /_synapse/* {
+        reverse_proxy host.docker.internal:8448 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+        }
+    }
+
+    # Matrix well-known delegation
+    handle /.well-known/matrix/* {
+        reverse_proxy host.docker.internal:8090 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+        }
+    }
+
+    # Element Web service worker - NO authorization (required for SW registration)
+    # Service workers cannot handle 302 redirects, must get direct 200 response
+    handle /babelfish/chat/sw.js {
+        rewrite * /sw.js
+        reverse_proxy host.docker.internal:8880 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+        }
     }
 
     # Apply authorization to all OTHER routes (services + root)
