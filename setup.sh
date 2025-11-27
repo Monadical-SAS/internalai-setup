@@ -3196,6 +3196,10 @@ cmd_self_update() {
 
     log_success "InternalAI CLI updated successfully!"
     log_info "Run 'internalai help' to see any new features"
+
+    # Exit immediately to prevent bash from reading the modified script
+    # Bash has a file position pointer that becomes invalid after we replace the script
+    exit 0
 }
 
 show_usage() {
