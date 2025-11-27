@@ -823,6 +823,7 @@ generate_index_html() {
                     <p>$desc</p>
                     <div class=\"links\">
                         <a href=\"/babelfish/\" target=\"_blank\" class=\"btn btn-primary\">Open</a>
+                        <a href=\"/babelfish/chat\" target=\"_blank\" class=\"btn btn-secondary\">Chat</a>
                     </div>
                 </div>"
                     ;;
@@ -1223,27 +1224,20 @@ generate_service_routes() {
                 ;;
             babelfish)
                 routes+="
+    # Element Web (Matrix Web Client)
+    # MUST come before general /babelfish/* handler to match first
+    handle_path /babelfish/chat/* {
+        reverse_proxy host.docker.internal:8880 {
+            header_up Host {http.reverse_proxy.upstream.hostport}
+            header_up X-Real-IP {http.request.remote.host}
+        }
+    }
+
     # Babelfish Bridge UI (Management Interface and API)
     # Using handle_path strips /babelfish prefix when proxying
     # So /babelfish/api/bridges/status -> port 3000 as /api/bridges/status
     handle_path /babelfish/* {
         reverse_proxy host.docker.internal:3000 {
-            header_up Host {http.reverse_proxy.upstream.hostport}
-            header_up X-Real-IP {http.request.remote.host}
-        }
-    }
-
-    # Babelfish Core API
-    handle_path /babelfish-api/* {
-        reverse_proxy host.docker.internal:8000 {
-            header_up Host {http.reverse_proxy.upstream.hostport}
-            header_up X-Real-IP {http.request.remote.host}
-        }
-    }
-
-    # Element Web (Matrix Web Client)
-    handle_path /element/* {
-        reverse_proxy host.docker.internal:8880 {
             header_up Host {http.reverse_proxy.upstream.hostport}
             header_up X-Real-IP {http.request.remote.host}
         }
@@ -1341,7 +1335,6 @@ generate_caddyfile() {
     cat > "$PLATFORM_ROOT/caddy/Caddyfile" <<EOF
 # Caddy reverse proxy configuration for Monadical Platform
 # Generated on $(date)
-
 {
     # Critical: Set order for security directives
     order authenticate before respond
@@ -1394,38 +1387,6 @@ generate_caddyfile() {
             set auth url /auth
             allow roles authp/admin
 
-            # Allow anonymous access to Matrix API endpoints
-            acl rule {
-                comment "Allow Matrix client API access without auth"
-                match path /_matrix/*
-                allow stop log info
-            }
-
-            acl rule {
-                comment "Allow Synapse admin API access without auth"
-                match path /_synapse/*
-                allow stop log info
-            }
-
-            acl rule {
-                comment "Allow Matrix well-known access without auth"
-                match path /.well-known/matrix/*
-                allow stop log info
-            }
-
-            # Allow anonymous access to Babelfish routes
-            acl rule {
-                comment "Allow Babelfish Bridge UI access without auth"
-                match path /babelfish/*
-                allow stop log info
-            }
-
-            acl rule {
-                comment "Allow Babelfish Core API access without auth"
-                match path /babelfish-api/*
-                allow stop log info
-            }
-
             acl rule {
                 comment "Allow authenticated admins"
                 match role authp/admin
@@ -1442,32 +1403,6 @@ $tls_config
     # Must come FIRST
     handle /auth* {
         authenticate with internalai_portal
-    }
-
-    # Matrix Synapse API endpoints (must come before general authorization)
-    handle /_matrix/* {
-        reverse_proxy host.docker.internal:8448 {
-            header_up Host {http.reverse_proxy.upstream.hostport}
-            header_up X-Real-IP {http.request.remote.host}
-            # WebSocket support for Matrix sync
-            header_up Connection {http.request.header.Connection}
-            header_up Upgrade {http.request.header.Upgrade}
-        }
-    }
-
-    # Matrix Synapse admin API
-    handle /_synapse/* {
-        reverse_proxy host.docker.internal:8448 {
-            header_up Host {http.reverse_proxy.upstream.hostport}
-            header_up X-Real-IP {http.request.remote.host}
-        }
-    }
-
-    # Matrix well-known delegation
-    handle /.well-known/matrix/* {
-        reverse_proxy host.docker.internal:8090 {
-            header_up Host {http.reverse_proxy.upstream.hostport}
-        }
     }
 
     # Apply authorization to all OTHER routes (services + root)
