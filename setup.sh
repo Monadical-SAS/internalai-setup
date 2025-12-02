@@ -2315,6 +2315,17 @@ configure_librechat() {
     prompt_or_cache "LITELLM_BASE_URL" "LiteLLM base URL" "https://litellm-notrack.app.monadical.io" false "$PLATFORM_ROOT/librechat/.env"
     prompt_or_cache "LITELLM_MODEL" "Default LiteLLM model" "GLM-4.5-Air-FP8-dev" false "$PLATFORM_ROOT/librechat/.env"
 
+    # Enable web search with local SearXng (always enabled)
+    SEARXNG_INSTANCE_URL="http://searxng:8080"
+    log_info "Web search will be enabled with local SearXng container"
+
+    # Get Firecrawl API key for web scraping
+    prompt_or_cache "FIRECRAWL_API_URL" "Firecrawl API URL" "https://api.firecrawl.dev" false "$PLATFORM_ROOT/librechat/.env"
+    prompt_or_cache "FIRECRAWL_API_KEY" "Firecrawl API key (for web scraping)" "" true "$PLATFORM_ROOT/librechat/.env"
+
+    # Get Cohere API key for reranking
+    prompt_or_cache "COHERE_API_KEY" "Cohere API key (for result reranking)" "" true "$PLATFORM_ROOT/librechat/.env"
+
     # Copy .env.example to .env
     if [ -f "$PLATFORM_ROOT/librechat/.env.example" ]; then
         log_info "Copying .env.example to .env..."
@@ -2326,15 +2337,24 @@ configure_librechat() {
 
     # Update DOMAIN_CLIENT and DOMAIN_SERVER in .env
     if grep -q "^DOMAIN_CLIENT=" "$PLATFORM_ROOT/librechat/.env"; then
-        sed -i "s|^DOMAIN_CLIENT=.*|DOMAIN_CLIENT=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
+        sed -i '' "s|^DOMAIN_CLIENT=.*|DOMAIN_CLIENT=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
     else
         echo "DOMAIN_CLIENT=${LIBRECHAT_URL}" >> "$PLATFORM_ROOT/librechat/.env"
     fi
 
     if grep -q "^DOMAIN_SERVER=" "$PLATFORM_ROOT/librechat/.env"; then
-        sed -i "s|^DOMAIN_SERVER=.*|DOMAIN_SERVER=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
+        sed -i '' "s|^DOMAIN_SERVER=.*|DOMAIN_SERVER=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
     else
         echo "DOMAIN_SERVER=${LIBRECHAT_URL}" >> "$PLATFORM_ROOT/librechat/.env"
+    fi
+
+    # Add SearXng environment variables if configured
+    if [ -n "$SEARXNG_INSTANCE_URL" ]; then
+        if grep -q "^SEARXNG_INSTANCE_URL=" "$PLATFORM_ROOT/librechat/.env"; then
+            sed -i '' "s|^SEARXNG_INSTANCE_URL=.*|SEARXNG_INSTANCE_URL=${SEARXNG_INSTANCE_URL}|" "$PLATFORM_ROOT/librechat/.env"
+        else
+            echo "SEARXNG_INSTANCE_URL=${SEARXNG_INSTANCE_URL}" >> "$PLATFORM_ROOT/librechat/.env"
+        fi
     fi
 
     # Create docker-compose.override.yml
@@ -2343,11 +2363,91 @@ services:
   api:
     volumes:
       - ./librechat.yaml:/app/librechat.yaml
+    env_file:
+      - .env
 EOF
+
+    # Add SearXng service if web search is enabled
+    if [ -n "$SEARXNG_INSTANCE_URL" ]; then
+        cat >> "$PLATFORM_ROOT/librechat/docker-compose.override.yml" <<EOF
+    environment:
+      - SEARXNG_INSTANCE_URL=http://searxng:8080
+      - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY}
+      - FIRECRAWL_API_URL=${FIRECRAWL_API_URL}
+      - COHERE_API_KEY=${COHERE_API_KEY}
+    depends_on:
+      - searxng
+EOF
+        cat >> "$PLATFORM_ROOT/librechat/docker-compose.override.yml" <<'EOF'
+  searxng:
+    container_name: librechat-searxng
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080/
+      - UWSGI_WORKERS=4
+      - UWSGI_THREADS=2
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    networks:
+      - default
+EOF
+
+        # Create SearXng settings directory and configuration
+        mkdir -p "$PLATFORM_ROOT/librechat/searxng"
+        cat > "$PLATFORM_ROOT/librechat/searxng/settings.yml" <<'EOF'
+use_default_settings: true
+
+general:
+  instance_name: "LibreChat SearXng"
+  privacypolicy_url: false
+  donation_url: false
+  contact_url: false
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "changeme-searxng-secret-key"
+  limiter: false
+  image_proxy: true
+  method: "GET"
+
+ui:
+  static_use_hash: true
+  default_theme: simple
+  theme_args:
+    simple_style: auto
+
+enabled_plugins:
+  - 'Hash plugin'
+  - 'Self Information'
+  - 'Tracker URL remover'
+  - 'Ahmia blacklist'
+
+engines:
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: bing
+    disabled: false
+EOF
+        log_success "SearXng service configured"
+    fi
 
     # Create librechat.yaml with LiteLLM configuration
     cat > "$PLATFORM_ROOT/librechat/librechat.yaml" <<EOF
-version: 1.2.1
+version: 1.2.6
+cache: true
 
 endpoints:
   custom:
@@ -2362,6 +2462,35 @@ endpoints:
       summarize: false
       summaryModel: "current_model"
       forcePrompt: false
+EOF
+
+    # Add agents configuration if web search is enabled
+    if [ -n "$SEARXNG_INSTANCE_URL" ]; then
+        cat >> "$PLATFORM_ROOT/librechat/librechat.yaml" <<'EOF'
+  agents:
+    disableBuilder: false
+    capabilities:
+      - "web_search"
+      - "tools"
+EOF
+    fi
+
+    # Add webSearch configuration if web search is enabled
+    if [ -n "$SEARXNG_INSTANCE_URL" ]; then
+        cat >> "$PLATFORM_ROOT/librechat/librechat.yaml" <<'EOF'
+webSearch:
+  searchProvider: "searxng"
+  searxngInstanceUrl: "${SEARXNG_INSTANCE_URL}"
+  scraperProvider: "firecrawl"
+  firecrawlApiKey: "${FIRECRAWL_API_KEY}"
+  firecrawlApiUrl: "${FIRECRAWL_API_URL}"
+  rerankerType: "cohere"
+  cohereApiKey: "${COHERE_API_KEY}"
+EOF
+    fi
+
+    # Add MCP servers configuration
+    cat >> "$PLATFORM_ROOT/librechat/librechat.yaml" <<EOF
 mcpServers:
   contactdb:
     type: streamable-http
