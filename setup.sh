@@ -2337,13 +2337,13 @@ configure_librechat() {
 
     # Update DOMAIN_CLIENT and DOMAIN_SERVER in .env
     if grep -q "^DOMAIN_CLIENT=" "$PLATFORM_ROOT/librechat/.env"; then
-        sed -i '' "s|^DOMAIN_CLIENT=.*|DOMAIN_CLIENT=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
+        sed -i "s|^DOMAIN_CLIENT=.*|DOMAIN_CLIENT=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
     else
         echo "DOMAIN_CLIENT=${LIBRECHAT_URL}" >> "$PLATFORM_ROOT/librechat/.env"
     fi
 
     if grep -q "^DOMAIN_SERVER=" "$PLATFORM_ROOT/librechat/.env"; then
-        sed -i '' "s|^DOMAIN_SERVER=.*|DOMAIN_SERVER=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
+        sed -i "s|^DOMAIN_SERVER=.*|DOMAIN_SERVER=${LIBRECHAT_URL}|" "$PLATFORM_ROOT/librechat/.env"
     else
         echo "DOMAIN_SERVER=${LIBRECHAT_URL}" >> "$PLATFORM_ROOT/librechat/.env"
     fi
@@ -2351,7 +2351,7 @@ configure_librechat() {
     # Add SearXng environment variables if configured
     if [ -n "$SEARXNG_INSTANCE_URL" ]; then
         if grep -q "^SEARXNG_INSTANCE_URL=" "$PLATFORM_ROOT/librechat/.env"; then
-            sed -i '' "s|^SEARXNG_INSTANCE_URL=.*|SEARXNG_INSTANCE_URL=${SEARXNG_INSTANCE_URL}|" "$PLATFORM_ROOT/librechat/.env"
+            sed -i "s|^SEARXNG_INSTANCE_URL=.*|SEARXNG_INSTANCE_URL=${SEARXNG_INSTANCE_URL}|" "$PLATFORM_ROOT/librechat/.env"
         else
             echo "SEARXNG_INSTANCE_URL=${SEARXNG_INSTANCE_URL}" >> "$PLATFORM_ROOT/librechat/.env"
         fi
